@@ -1,0 +1,10 @@
+node_modules
+.venv
+uploads
+frames
+outputs
+datasets
+barrel-ai-dataset
+.env
+__pycache__
+*.pyc
