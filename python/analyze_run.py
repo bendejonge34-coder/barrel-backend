@@ -24,12 +24,20 @@ HORSE_MODEL_PATH = os.path.join(BASE_DIR, "yolov8n.pt")
 HORSE_CLASS_ID = 17  # COCO horse
 BARREL_LABELS = ["barrel1", "barrel2", "barrel3"]
 
-HORSE_CONFIDENCE_THRESHOLD = 0.15
+# Memory / speed tuned down for cloud hosting
+HORSE_CONFIDENCE_THRESHOLD = 0.18
 BARREL_CONFIDENCE_THRESHOLD = 0.50
-TARGET_SAMPLE_FPS = 5.0
-MAX_SAMPLED_FRAMES = 90
-MIN_SAMPLED_FRAMES = 30
+TARGET_SAMPLE_FPS = 2.0
+MAX_SAMPLED_FRAMES = 36
+MIN_SAMPLED_FRAMES = 18
 SMOOTHING_ALPHA = 0.35
+
+# Resize video frames before inference to reduce RAM and speed up YOLO
+MAX_INFERENCE_WIDTH = 640
+MAX_INFERENCE_HEIGHT = 360
+
+# Do not save individual sampled frames / overlays in production
+SAVE_DEBUG_FRAMES = False
 
 
 def emit_json(payload):
@@ -90,6 +98,32 @@ def load_model(model_path):
         return YOLO(model_path)
 
 
+def resize_for_inference(frame):
+    if frame is None:
+        return None, 1.0, 1.0
+
+    original_height, original_width = frame.shape[:2]
+
+    if original_width <= 0 or original_height <= 0:
+        return frame, 1.0, 1.0
+
+    width_scale = MAX_INFERENCE_WIDTH / float(original_width)
+    height_scale = MAX_INFERENCE_HEIGHT / float(original_height)
+    scale = min(width_scale, height_scale, 1.0)
+
+    if scale >= 1.0:
+        return frame, 1.0, 1.0
+
+    new_width = max(1, int(round(original_width * scale)))
+    new_height = max(1, int(round(original_height * scale)))
+
+    resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+    x_ratio = original_width / float(new_width)
+    y_ratio = original_height / float(new_height)
+
+    return resized, x_ratio, y_ratio
+
+
 def detect_barrels_in_frame(frame, barrel_model, confidence_threshold=BARREL_CONFIDENCE_THRESHOLD):
     with contextlib.redirect_stdout(io.StringIO()):
         results = barrel_model.predict(
@@ -108,19 +142,36 @@ def detect_barrels_in_frame(frame, barrel_model, confidence_threshold=BARREL_CON
         conf = float(box.conf[0].item())
 
         barrels.append({
-            "x1": int(x1),
-            "y1": int(y1),
-            "x2": int(x2),
-            "y2": int(y2),
+            "x1": float(x1),
+            "y1": float(y1),
+            "x2": float(x2),
+            "y2": float(y2),
             "confidence": round(conf, 3),
-            "center_x": int((x1 + x2) / 2),
-            "center_y": int((y1 + y2) / 2),
+            "center_x": float((x1 + x2) / 2.0),
+            "center_y": float((y1 + y2) / 2.0),
         })
 
     return barrels
 
 
-def build_horse_candidates(result):
+def scale_barrel_detections_to_original(barrels, x_ratio, y_ratio):
+    scaled = []
+
+    for barrel in barrels:
+        scaled.append({
+            "x1": int(round(float(barrel["x1"]) * x_ratio)),
+            "y1": int(round(float(barrel["y1"]) * y_ratio)),
+            "x2": int(round(float(barrel["x2"]) * x_ratio)),
+            "y2": int(round(float(barrel["y2"]) * y_ratio)),
+            "confidence": barrel["confidence"],
+            "center_x": int(round(float(barrel["center_x"]) * x_ratio)),
+            "center_y": int(round(float(barrel["center_y"]) * y_ratio)),
+        })
+
+    return scaled
+
+
+def build_horse_candidates(result, x_ratio=1.0, y_ratio=1.0):
     if result.boxes is None or len(result.boxes) == 0:
         return []
 
@@ -135,7 +186,12 @@ def build_horse_candidates(result):
             continue
 
         x1, y1, x2, y2 = box
-        cx, cy = compute_bottom_center(box)
+        x1 *= x_ratio
+        y1 *= y_ratio
+        x2 *= x_ratio
+        y2 *= y_ratio
+
+        cx, cy = compute_bottom_center((x1, y1, x2, y2))
         area = max(0.0, (x2 - x1) * (y2 - y1))
 
         candidates.append({
@@ -228,91 +284,60 @@ def normalize_points_to_unit_box(points, padding=0.08):
     return normalized
 
 
-def draw_overlay(frame, horse_detection, trail_points, barrel_detections=None):
-    overlay = frame.copy()
-
-    if barrel_detections:
-        for barrel in barrel_detections:
-            x1 = int(barrel["x1"])
-            y1 = int(barrel["y1"])
-            x2 = int(barrel["x2"])
-            y2 = int(barrel["y2"])
-            cx = int(barrel["center_x"])
-            cy = int(barrel["center_y"])
-            conf = float(barrel["confidence"])
-
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 0, 0), 3)
-            cv2.circle(overlay, (cx, cy), 6, (255, 255, 0), -1)
-            cv2.putText(
-                overlay,
-                f"Barrel {conf:.2f}",
-                (x1, max(30, y1 - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 0, 0),
-                2,
-                cv2.LINE_AA,
-            )
-
-    if horse_detection is not None:
-        x1, y1, x2, y2 = horse_detection["bbox"]
-        cx, cy = horse_detection["center"]
-
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        cx, cy = int(cx), int(cy)
-
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 3)
-        cv2.circle(overlay, (cx, cy), 8, (255, 0, 255), -1)
-
-        cv2.putText(
-            overlay,
-            f"Horse {horse_detection['confidence']:.2f}",
-            (x1, max(30, y1 - 10)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-
-    for i in range(1, len(trail_points)):
-        p1 = (int(trail_points[i - 1][0]), int(trail_points[i - 1][1]))
-        p2 = (int(trail_points[i][0]), int(trail_points[i][1]))
-        cv2.line(overlay, p1, p2, (255, 255, 0), 3)
-
-    return overlay
-
-
 def save_path_map(width, height, raw_points, accepted_points, smooth_points_list, out_path, identified_barrels=None):
-    canvas = 255 * (cv2.UMat(height, width, cv2.CV_8UC3).get() * 0 + 1)
+    canvas_width = min(width, 960)
+    canvas_height = min(height, 540)
+
+    scale_x = canvas_width / float(max(width, 1))
+    scale_y = canvas_height / float(max(height, 1))
+
+    canvas = 255 * (cv2.UMat(canvas_height, canvas_width, cv2.CV_8UC3).get() * 0 + 1)
 
     for pt in raw_points:
-        cv2.circle(canvas, (int(pt[0]), int(pt[1])), 3, (180, 180, 180), -1)
+        cv2.circle(
+            canvas,
+            (int(pt[0] * scale_x), int(pt[1] * scale_y)),
+            2,
+            (180, 180, 180),
+            -1,
+        )
 
     for pt in accepted_points:
-        cv2.circle(canvas, (int(pt[0]), int(pt[1])), 4, (0, 165, 255), -1)
+        cv2.circle(
+            canvas,
+            (int(pt[0] * scale_x), int(pt[1] * scale_y)),
+            3,
+            (0, 165, 255),
+            -1,
+        )
 
     for i in range(1, len(smooth_points_list)):
-        p1 = (int(smooth_points_list[i - 1][0]), int(smooth_points_list[i - 1][1]))
-        p2 = (int(smooth_points_list[i][0]), int(smooth_points_list[i][1]))
-        cv2.line(canvas, p1, p2, (255, 0, 0), 4)
+        p1 = (int(smooth_points_list[i - 1][0] * scale_x), int(smooth_points_list[i - 1][1] * scale_y))
+        p2 = (int(smooth_points_list[i][0] * scale_x), int(smooth_points_list[i][1] * scale_y))
+        cv2.line(canvas, p1, p2, (255, 0, 0), 3)
 
     for pt in smooth_points_list:
-        cv2.circle(canvas, (int(pt[0]), int(pt[1])), 5, (0, 0, 255), -1)
+        cv2.circle(
+            canvas,
+            (int(pt[0] * scale_x), int(pt[1] * scale_y)),
+            4,
+            (0, 0, 255),
+            -1,
+        )
 
     if identified_barrels:
         for barrel_name, barrel_info in identified_barrels.items():
             if barrel_info is None:
                 continue
-            x = int(barrel_info["center_x"])
-            y = int(barrel_info["center_y"])
-            cv2.circle(canvas, (x, y), 16, (0, 255, 255), 3)
+            x = int(barrel_info["center_x"] * scale_x)
+            y = int(barrel_info["center_y"] * scale_y)
+            cv2.circle(canvas, (x, y), 12, (0, 255, 255), 2)
             cv2.putText(
                 canvas,
                 barrel_name.upper(),
-                (x + 8, max(25, y - 8)),
+                (x + 8, max(20, y - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
+                0.6,
                 (0, 120, 255),
                 2,
                 cv2.LINE_AA,
@@ -1047,25 +1072,25 @@ def main():
     try:
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         duration = (frame_count / fps) if fps > 0 else 0.0
 
-        if frame_count <= 0 or width <= 0 or height <= 0:
+        if frame_count <= 0 or original_width <= 0 or original_height <= 0:
             fail(
                 "Video metadata could not be read correctly.",
                 {
                     "video_path": video_path,
                     "frame_count": frame_count,
                     "fps": fps,
-                    "width": width,
-                    "height": height,
+                    "width": original_width,
+                    "height": original_height,
                 },
             )
             return
 
         sample_indices = build_sample_frame_indices(frame_count, fps)
-        max_jump = adaptive_max_jump(width, height)
+        max_jump = adaptive_max_jump(original_width, original_height)
 
         sampled_frames = []
         all_barrel_detections = []
@@ -1097,13 +1122,17 @@ def main():
             if ret and frame is not None:
                 read_success_count += 1
 
-                image_path = f"{video_path}_frame_{idx:03d}.jpg"
-                safe_imwrite(image_path, frame)
+                inference_frame, x_ratio, y_ratio = resize_for_inference(frame)
 
-                barrel_detections = detect_barrels_in_frame(
-                    frame,
+                barrel_detections_resized = detect_barrels_in_frame(
+                    inference_frame,
                     barrel_model,
                     confidence_threshold=BARREL_CONFIDENCE_THRESHOLD,
+                )
+                barrel_detections = scale_barrel_detections_to_original(
+                    barrel_detections_resized,
+                    x_ratio,
+                    y_ratio,
                 )
 
                 all_barrel_detections.append({
@@ -1114,7 +1143,7 @@ def main():
 
                 with contextlib.redirect_stdout(io.StringIO()):
                     horse_results = horse_model.predict(
-                        source=frame,
+                        source=inference_frame,
                         conf=HORSE_CONFIDENCE_THRESHOLD,
                         classes=[HORSE_CLASS_ID],
                         verbose=False,
@@ -1122,13 +1151,13 @@ def main():
 
                 candidates = []
                 if horse_results and len(horse_results) > 0:
-                    candidates = build_horse_candidates(horse_results[0])
+                    candidates = build_horse_candidates(horse_results[0], x_ratio=x_ratio, y_ratio=y_ratio)
 
                 best_candidate = choose_best_candidate(
                     candidates,
                     previous_accepted_point,
-                    width,
-                    height,
+                    original_width,
+                    original_height,
                 )
 
                 if best_candidate is not None:
@@ -1159,9 +1188,9 @@ def main():
 
                 smoothed_points = smooth_points(accepted_points, alpha=SMOOTHING_ALPHA)
 
-                overlay = draw_overlay(frame, horse_detection, smoothed_points, barrel_detections)
-                overlay_image_path = f"{video_path}_frame_{idx:03d}_overlay.jpg"
-                safe_imwrite(overlay_image_path, overlay)
+                if SAVE_DEBUG_FRAMES:
+                    image_path = f"{video_path}_frame_{idx:03d}.jpg"
+                    safe_imwrite(image_path, frame)
 
             sampled_frames.append({
                 "percent": round(percent, 4),
@@ -1177,21 +1206,21 @@ def main():
             })
 
         barrel_detection_summary = summarize_barrel_detections(all_barrel_detections)
-        identified_barrels = identify_barrels(all_barrel_detections, width, height)
+        identified_barrels = identify_barrels(all_barrel_detections, original_width, original_height)
 
         frame_metrics = build_frame_metrics(sampled_frames, identified_barrels)
         motion_samples = build_motion_samples(frame_metrics)
-        turns = build_turns(frame_metrics, width, height)
+        turns = build_turns(frame_metrics, original_width, original_height)
         barrel_metrics = build_barrel_metrics(turns, motion_samples, identified_barrels)
         splits = build_splits(turns, motion_samples)
         insights = build_insights(barrel_metrics, splits, identified_barrels)
 
         path_map_path = None
-        if width > 0 and height > 0 and len(smoothed_points) > 1:
+        if len(smoothed_points) > 1:
             path_map_path = f"{video_path}_path_map.jpg"
             save_path_map(
-                width,
-                height,
+                original_width,
+                original_height,
                 raw_trajectory_points,
                 accepted_points,
                 smoothed_points,
@@ -1220,8 +1249,8 @@ def main():
             "video_path": video_path,
             "frame_count": frame_count,
             "fps": round(fps, 3),
-            "width": width,
-            "height": height,
+            "width": original_width,
+            "height": original_height,
             "duration_seconds": round(duration, 3),
 
             "horse_detected_frames": horse_detected_count,
