@@ -15,17 +15,14 @@ const execFileAsync = promisify(execFile);
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const EXEC_MAX_BUFFER = 1024 * 1024 * 50; // 50 MB
+const PYTHON_TIMEOUT_MS = 1000 * 60 * 12; // 12 minutes
+const JOB_TTL_MS = 1000 * 60 * 60;
 
 const pythonExePath =
   process.env.PYTHON_PATH ||
   (process.platform === "win32" ? "python" : "python3");
 
-const pythonScriptPath = path.join(
-  process.cwd(),
-  "python",
-  "analyze_run.py"
-);
-
+const pythonScriptPath = path.join(process.cwd(), "python", "analyze_run.py");
 const uploadsDir = path.join(process.cwd(), "uploads");
 
 console.log("===== SERVER START =====");
@@ -41,7 +38,6 @@ const openai = new OpenAI({
 });
 
 const jobs = new Map();
-const JOB_TTL_MS = 1000 * 60 * 60;
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -116,6 +112,40 @@ function safeParseJson(input, fallback = null) {
   }
 }
 
+function extractLastJsonObject(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // keep trying
+  }
+
+  const end = raw.lastIndexOf("}");
+  if (end === -1) return null;
+
+  for (
+    let start = raw.lastIndexOf("{", end);
+    start !== -1;
+    start = raw.lastIndexOf("{", start - 1)
+  ) {
+    const candidate = raw.slice(start, end + 1);
+
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep trying earlier opening braces
+    }
+  }
+
+  return null;
+}
+
+function previewText(text, max = 1200) {
+  return String(text || "").slice(0, max);
+}
+
 function safeCleanup(paths) {
   for (const targetPath of paths) {
     try {
@@ -138,7 +168,10 @@ function safeCleanup(paths) {
 
       if (stats.isDirectory()) {
         fs.rmSync(normalizedPath, { recursive: true, force: true });
-      } else if (isInsideUploads || normalizedPath.includes(`${path.sep}python${path.sep}`)) {
+      } else if (
+        isInsideUploads ||
+        normalizedPath.includes(`${path.sep}python${path.sep}`)
+      ) {
         fs.unlinkSync(normalizedPath);
       } else {
         console.warn("Skipping cleanup for unexpected file path:", normalizedPath);
@@ -645,30 +678,69 @@ async function runPythonAnalysis(videoPath) {
   console.log("Running Python analysis...");
   console.log("Video Path:", videoPath);
 
-  const { stdout, stderr } = await execFileAsync(
-    pythonExePath,
-    [pythonScriptPath, videoPath],
-    { maxBuffer: EXEC_MAX_BUFFER }
-  );
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      pythonExePath,
+      [pythonScriptPath, videoPath],
+      {
+        maxBuffer: EXEC_MAX_BUFFER,
+        timeout: PYTHON_TIMEOUT_MS,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+          YOLO_CONFIG_DIR: "/tmp/Ultralytics",
+        },
+      }
+    );
 
-  if (stderr) {
-    console.warn("Python stderr:", stderr);
+    if (stderr && String(stderr).trim()) {
+      console.warn("Python stderr preview:", previewText(stderr));
+    }
+
+    console.log("Python stdout length:", String(stdout || "").length);
+
+    const pythonResult =
+      safeParseJson(stdout) || extractLastJsonObject(stdout);
+
+    if (!pythonResult) {
+      console.error("Invalid Python output preview:", previewText(stdout));
+      throw new Error("Python returned invalid JSON.");
+    }
+
+    if (!pythonResult.ok) {
+      throw new Error(pythonResult.error || "Python analysis failed.");
+    }
+
+    return pythonResult;
+  } catch (error) {
+    if (error?.stdout) {
+      console.error("Python stdout on failure:", previewText(error.stdout));
+    }
+
+    if (error?.stderr) {
+      console.error("Python stderr on failure:", previewText(error.stderr));
+    }
+
+    const recovered =
+      safeParseJson(error?.stdout) || extractLastJsonObject(error?.stdout);
+
+    if (recovered) {
+      if (!recovered.ok) {
+        throw new Error(recovered.error || "Python analysis failed.");
+      }
+      return recovered;
+    }
+
+    if (error?.killed || error?.signal === "SIGTERM") {
+      throw new Error("Python analysis timed out on the server.");
+    }
+
+    if (error?.code === "ETIMEDOUT") {
+      throw new Error("Python analysis timed out on the server.");
+    }
+
+    throw error;
   }
-
-  console.log("Python stdout length:", String(stdout || "").length);
-
-  const pythonResult = safeParseJson(stdout);
-
-  if (!pythonResult) {
-    console.error("Invalid Python output preview:", String(stdout || "").slice(0, 1000));
-    throw new Error("Python returned invalid JSON.");
-  }
-
-  if (!pythonResult.ok) {
-    throw new Error(pythonResult.error || "Python analysis failed.");
-  }
-
-  return pythonResult;
 }
 
 async function processVideoJob(jobId) {
@@ -747,7 +819,10 @@ async function processVideoJob(jobId) {
     try {
       parsedAnalysis = parseModelJson(outputText);
     } catch {
-      console.error("Invalid OpenAI JSON output preview:", String(outputText || "").slice(0, 1000));
+      console.error(
+        "Invalid OpenAI JSON output preview:",
+        String(outputText || "").slice(0, 1000)
+      );
       throw new Error("OpenAI returned invalid JSON.");
     }
 
@@ -821,7 +896,10 @@ async function processTextJob(jobId) {
     try {
       parsedAnalysis = parseModelJson(outputText);
     } catch {
-      console.error("Invalid OpenAI JSON output preview:", String(outputText || "").slice(0, 1000));
+      console.error(
+        "Invalid OpenAI JSON output preview:",
+        String(outputText || "").slice(0, 1000)
+      );
       throw new Error("OpenAI returned invalid JSON.");
     }
 
