@@ -1246,7 +1246,7 @@ def main():
         smoothed_path_points = [round_point(pt, 2) for pt in smoothed_points]
         normalized_smoothed_path_points = normalize_points_to_unit_box(smoothed_points)
 
-                output = {
+        output = {
             "ok": True,
             "message": "Video opened and barrel-aware run analysis was completed.",
             "video_path": video_path,
