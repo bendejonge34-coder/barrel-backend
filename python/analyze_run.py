@@ -1,12 +1,15 @@
+import os
+
+# Must be set BEFORE importing ultralytics
+os.environ["YOLO_CONFIG_DIR"] = "/tmp/Ultralytics"
+
 import json
 import sys
 import cv2
-import os
 import math
 import contextlib
 import io
 from ultralytics import YOLO
-
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 BARREL_MODEL_PATH = os.path.join(
@@ -1243,7 +1246,7 @@ def main():
         smoothed_path_points = [round_point(pt, 2) for pt in smoothed_points]
         normalized_smoothed_path_points = normalize_points_to_unit_box(smoothed_points)
 
-        output = {
+                output = {
             "ok": True,
             "message": "Video opened and barrel-aware run analysis was completed.",
             "video_path": video_path,
@@ -1276,16 +1279,14 @@ def main():
             "sampled_frames": sampled_frames,
         }
 
-        emit_json(output)
+        print(json.dumps(output))
 
     except Exception as runtime_error:
-        fail(
-            "Python analysis crashed.",
-            {
-                "details": str(runtime_error),
-                "video_path": video_path,
-            },
-        )
+        print(json.dumps({
+            "error": "Python analysis crashed",
+            "details": str(runtime_error),
+            "video_path": video_path,
+        }))
     finally:
         cap.release()
 
