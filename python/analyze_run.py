@@ -1,15 +1,18 @@
 import os
-
-# Must be set BEFORE importing ultralytics
-os.environ["YOLO_CONFIG_DIR"] = "/tmp/Ultralytics"
-
-import json
 import sys
+import json
 import cv2
 import math
 import contextlib
 import io
+import traceback
+
+# Must be set BEFORE importing ultralytics
+os.environ["YOLO_CONFIG_DIR"] = "/tmp/Ultralytics"
+os.environ["PYTHONUNBUFFERED"] = "1"
+
 from ultralytics import YOLO
+
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 BARREL_MODEL_PATH = os.path.join(
@@ -43,8 +46,13 @@ MAX_INFERENCE_HEIGHT = 360
 SAVE_DEBUG_FRAMES = False
 
 
+def log_err(*args):
+    print(*args, file=sys.stderr, flush=True)
+
+
 def emit_json(payload):
-    print(json.dumps(payload))
+    sys.stdout.write(json.dumps(payload))
+    sys.stdout.flush()
 
 
 def fail(error_message, extra=None):
@@ -97,7 +105,7 @@ def load_model(model_path):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    with contextlib.redirect_stdout(io.StringIO()):
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         return YOLO(model_path)
 
 
@@ -128,7 +136,7 @@ def resize_for_inference(frame):
 
 
 def detect_barrels_in_frame(frame, barrel_model, confidence_threshold=BARREL_CONFIDENCE_THRESHOLD):
-    with contextlib.redirect_stdout(io.StringIO()):
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         results = barrel_model.predict(
             source=frame,
             conf=confidence_threshold,
@@ -1060,6 +1068,7 @@ def main():
         return
 
     try:
+        log_err("Loading models...")
         barrel_model = load_model(BARREL_MODEL_PATH)
         horse_model = load_model(HORSE_MODEL_PATH)
     except Exception as model_error:
@@ -1091,6 +1100,11 @@ def main():
                 },
             )
             return
+
+        log_err(
+            f"Video opened. frame_count={frame_count}, fps={round(fps, 3)}, "
+            f"width={original_width}, height={original_height}, duration={round(duration, 3)}"
+        )
 
         sample_indices = build_sample_frame_indices(frame_count, fps)
         max_jump = adaptive_max_jump(original_width, original_height)
@@ -1144,7 +1158,7 @@ def main():
                     "barrels": barrel_detections,
                 })
 
-                with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     horse_results = horse_model.predict(
                         source=inference_frame,
                         conf=HORSE_CONFIDENCE_THRESHOLD,
@@ -1279,14 +1293,19 @@ def main():
             "sampled_frames": sampled_frames,
         }
 
-        print(json.dumps(output))
+        emit_json(output)
 
     except Exception as runtime_error:
-        print(json.dumps({
+        log_err("Python analysis crashed:", str(runtime_error))
+        log_err(traceback.format_exc())
+
+        emit_json({
+            "ok": False,
             "error": "Python analysis crashed",
             "details": str(runtime_error),
+            "traceback": traceback.format_exc(),
             "video_path": video_path,
-        }))
+        })
     finally:
         cap.release()
 
