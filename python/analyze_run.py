@@ -34,16 +34,13 @@ BARREL_LABELS = ["barrel1", "barrel2", "barrel3"]
 HORSE_CONFIDENCE_THRESHOLD = 0.18
 BARREL_CONFIDENCE_THRESHOLD = 0.50
 TARGET_SAMPLE_FPS = 2.0
-MAX_SAMPLED_FRAMES = 36
-MIN_SAMPLED_FRAMES = 18
+MAX_SAMPLED_FRAMES = 24
+MIN_SAMPLED_FRAMES = 12
 SMOOTHING_ALPHA = 0.35
 
 # Resize video frames before inference to reduce RAM and speed up YOLO
 MAX_INFERENCE_WIDTH = 640
 MAX_INFERENCE_HEIGHT = 360
-
-# Do not save individual sampled frames / overlays in production
-SAVE_DEBUG_FRAMES = False
 
 
 def log_err(*args):
@@ -96,6 +93,9 @@ def safe_imwrite(output_path, image):
     try:
         if image is None:
             return False
+        parent = os.path.dirname(output_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         return bool(cv2.imwrite(output_path, image))
     except Exception:
         return False
@@ -1048,6 +1048,95 @@ def build_insights(barrel_metrics, splits, identified_barrels):
     return insights[:12]
 
 
+def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, frame_index, timestamp_seconds):
+    overlay = frame.copy()
+
+    # Draw current barrel detections
+    for barrel in barrel_detections or []:
+        x1 = int(barrel["x1"])
+        y1 = int(barrel["y1"])
+        x2 = int(barrel["x2"])
+        y2 = int(barrel["y2"])
+        conf = barrel.get("confidence")
+
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        cv2.putText(
+            overlay,
+            f"barrel {conf}",
+            (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 180, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    # Draw stable identified barrels
+    if identified_barrels:
+        for barrel_name, barrel_info in identified_barrels.items():
+            if barrel_info is None:
+                continue
+            x = int(barrel_info["center_x"])
+            y = int(barrel_info["center_y"])
+            cv2.circle(overlay, (x, y), 12, (255, 255, 0), 2)
+            cv2.putText(
+                overlay,
+                barrel_name.upper(),
+                (x + 8, max(20, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+    # Draw horse detection
+    if horse_detection:
+        x1, y1, x2, y2 = [int(v) for v in horse_detection["bbox"]]
+        cx, cy = [int(v) for v in horse_detection["center"]]
+        conf = horse_detection.get("confidence")
+
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
+        cv2.putText(
+            overlay,
+            f"horse {conf}",
+            (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+    # Header text
+    header_1 = f"frame {frame_index}"
+    header_2 = f"time {timestamp_seconds}s" if timestamp_seconds is not None else "time unknown"
+
+    cv2.putText(
+        overlay,
+        header_1,
+        (16, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        overlay,
+        header_2,
+        (16, 56),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+    return overlay
+
+
 def main():
     video_path = sys.argv[1] if len(sys.argv) > 1 else None
 
@@ -1066,6 +1155,9 @@ def main():
     if not os.path.exists(HORSE_MODEL_PATH):
         fail("Horse model file does not exist.", {"horse_model_path": HORSE_MODEL_PATH})
         return
+
+    output_dir = f"{video_path}_frames"
+    os.makedirs(output_dir, exist_ok=True)
 
     try:
         log_err("Loading models...")
@@ -1123,6 +1215,7 @@ def main():
 
         previous_accepted_point = None
 
+        # Pass 1: read/sample/detect
         for idx, target_frame in enumerate(sample_indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
             ret, frame = cap.read()
@@ -1205,9 +1298,10 @@ def main():
 
                 smoothed_points = smooth_points(accepted_points, alpha=SMOOTHING_ALPHA)
 
-                if SAVE_DEBUG_FRAMES:
-                    image_path = f"{video_path}_frame_{idx:03d}.jpg"
-                    safe_imwrite(image_path, frame)
+                frame_file = os.path.join(output_dir, f"frame_{idx:03d}.jpg")
+                wrote_frame = safe_imwrite(frame_file, frame)
+                if wrote_frame and os.path.exists(frame_file):
+                    image_path = frame_file
 
             sampled_frames.append({
                 "percent": round(percent, 4),
@@ -1232,6 +1326,35 @@ def main():
         splits = build_splits(turns, motion_samples)
         insights = build_insights(barrel_metrics, splits, identified_barrels)
 
+        # Pass 2: create overlays now that stable barrels are known
+        usable_frame_image_count = 0
+        usable_overlay_image_count = 0
+
+        for idx, frame_entry in enumerate(sampled_frames):
+            if not frame_entry["read_success"]:
+                continue
+
+            frame_file = frame_entry.get("image_path")
+            if frame_file and os.path.exists(frame_file):
+                usable_frame_image_count += 1
+
+                frame = cv2.imread(frame_file)
+                if frame is not None:
+                    overlay = draw_overlay(
+                        frame=frame,
+                        horse_detection=frame_entry.get("horse_detection"),
+                        barrel_detections=frame_entry.get("barrel_detections") or [],
+                        identified_barrels=identified_barrels,
+                        frame_index=frame_entry["frame_index"],
+                        timestamp_seconds=frame_entry["timestamp_seconds"],
+                    )
+
+                    overlay_file = os.path.join(output_dir, f"overlay_{idx:03d}.jpg")
+                    wrote_overlay = safe_imwrite(overlay_file, overlay)
+                    if wrote_overlay and os.path.exists(overlay_file):
+                        frame_entry["overlay_image_path"] = overlay_file
+                        usable_overlay_image_count += 1
+
         path_map_path = None
         if len(smoothed_points) > 1:
             path_map_path = f"{video_path}_path_map.jpg"
@@ -1255,6 +1378,8 @@ def main():
             "read_success_rate": round(read_success_count / max(len(sample_indices), 1), 4),
             "horse_detection_rate": round(horse_detected_count / max(read_success_count, 1), 4),
             "accepted_point_rate": round(len(accepted_points) / max(horse_detected_count, 1), 4),
+            "usable_frame_image_count": usable_frame_image_count,
+            "usable_overlay_image_count": usable_overlay_image_count,
         }
 
         smoothed_path_points = [round_point(pt, 2) for pt in smoothed_points]
