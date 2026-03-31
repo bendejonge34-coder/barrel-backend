@@ -42,6 +42,22 @@ SMOOTHING_ALPHA = 0.35
 MAX_INFERENCE_WIDTH = 640
 MAX_INFERENCE_HEIGHT = 360
 
+PATTERN_APEX_TIME_TOLERANCE_SECONDS = 0.20
+
+# Canonical layout used for template comparison
+CANONICAL_LEFT_BARREL_X = 0.20
+CANONICAL_RIGHT_BARREL_X = 0.80
+CANONICAL_TOP_BARREL_X = 0.50
+
+CANONICAL_TOP_BARREL_Y = 0.18
+CANONICAL_LOWER_BARREL_Y = 0.72
+CANONICAL_HOME_Y = 1.02
+
+# Ideal path thresholds in normalized space
+IDEAL_PATH_MEAN_DISTANCE_BAD = 0.14
+IDEAL_PATH_P90_DISTANCE_BAD = 0.22
+IDEAL_PATH_MAX_DISTANCE_BAD = 0.30
+
 
 def log_err(*args):
     print(*args, file=sys.stderr, flush=True)
@@ -295,7 +311,17 @@ def normalize_points_to_unit_box(points, padding=0.08):
     return normalized
 
 
-def save_path_map(width, height, raw_points, accepted_points, smooth_points_list, out_path, identified_barrels=None):
+def save_path_map(
+    width,
+    height,
+    raw_points,
+    accepted_points,
+    smooth_points_list,
+    out_path,
+    identified_barrels=None,
+    normalized_actual_path=None,
+    template_path=None,
+):
     canvas_width = min(width, 960)
     canvas_height = min(height, 540)
 
@@ -353,6 +379,73 @@ def save_path_map(width, height, raw_points, accepted_points, smooth_points_list
                 2,
                 cv2.LINE_AA,
             )
+
+    if normalized_actual_path and template_path:
+        mini_w = 260
+        mini_h = 320
+        origin_x = max(20, canvas_width - mini_w - 20)
+        origin_y = 20
+
+        cv2.rectangle(
+            canvas,
+            (origin_x, origin_y),
+            (origin_x + mini_w, origin_y + mini_h),
+            (220, 220, 220),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (origin_x, origin_y),
+            (origin_x + mini_w, origin_y + mini_h),
+            (120, 120, 120),
+            2,
+        )
+
+        def draw_norm_polyline(points, color, thickness):
+            if not points or len(points) < 2:
+                return
+            for i in range(1, len(points)):
+                x1 = origin_x + int(points[i - 1][0] * mini_w)
+                y1 = origin_y + int(points[i - 1][1] * mini_h)
+                x2 = origin_x + int(points[i][0] * mini_w)
+                y2 = origin_y + int(points[i][1] * mini_h)
+                cv2.line(canvas, (x1, y1), (x2, y2), color, thickness)
+
+        # template first, actual on top
+        draw_norm_polyline(template_path, (190, 190, 190), 2)
+        draw_norm_polyline(normalized_actual_path, (0, 140, 255), 2)
+
+        # canonical barrel markers
+        canonical_barrels = [
+            ("B1", CANONICAL_RIGHT_BARREL_X, CANONICAL_LOWER_BARREL_Y),
+            ("B2", CANONICAL_LEFT_BARREL_X, CANONICAL_LOWER_BARREL_Y),
+            ("B3", CANONICAL_TOP_BARREL_X, CANONICAL_TOP_BARREL_Y),
+        ]
+        for label, bx, by in canonical_barrels:
+            px = origin_x + int(bx * mini_w)
+            py = origin_y + int(by * mini_h)
+            cv2.circle(canvas, (px, py), 8, (0, 0, 0), 2)
+            cv2.putText(
+                canvas,
+                label,
+                (px + 8, max(origin_y + 16, py - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (40, 40, 40),
+                1,
+                cv2.LINE_AA,
+            )
+
+        cv2.putText(
+            canvas,
+            "ideal vs actual",
+            (origin_x + 10, origin_y + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (60, 60, 60),
+            1,
+            cv2.LINE_AA,
+        )
 
     safe_imwrite(out_path, canvas)
 
@@ -569,34 +662,112 @@ def cluster_barrel_points(points, width, height, max_clusters=3, iterations=12):
             matched["source_points"].extend(cluster["source_points"])
 
     merged = sorted(merged, key=lambda c: c["detection_count"], reverse=True)[:3]
-    merged = sorted(merged, key=lambda c: c["center_x"])
-
     return merged
+
+
+def assign_geometry_barrels_from_clusters(clusters):
+    """
+    Provisional geometry mapping:
+    - barrel3 = top barrel
+    - barrel1 = lower-left barrel
+    - barrel2 = lower-right barrel
+
+    This is not final competition order.
+    Final order is determined later by detected pattern direction.
+    """
+    identified = {
+        "barrel1": None,  # provisional lower-left
+        "barrel2": None,  # provisional lower-right
+        "barrel3": None,  # provisional top
+    }
+
+    if not clusters:
+        return identified, {
+            "top": None,
+            "lower_left": None,
+            "lower_right": None,
+        }
+
+    cluster_points = sorted(
+        clusters,
+        key=lambda c: (float(c["center_y"]), -int(c["detection_count"]))
+    )
+
+    top_cluster = cluster_points[0]
+    remaining = cluster_points[1:]
+
+    lower_left = None
+    lower_right = None
+
+    if len(remaining) == 1:
+        only = remaining[0]
+        if float(only["center_x"]) <= float(top_cluster["center_x"]):
+            lower_left = only
+        else:
+            lower_right = only
+    elif len(remaining) >= 2:
+        remaining = sorted(remaining, key=lambda c: float(c["center_x"]))
+        lower_left = remaining[0]
+        lower_right = remaining[1]
+
+    geometry_named = {
+        "top": top_cluster,
+        "lower_left": lower_left,
+        "lower_right": lower_right,
+    }
+
+    if lower_left is not None:
+        identified["barrel1"] = {
+            "center_x": round(float(lower_left["center_x"]), 2),
+            "center_y": round(float(lower_left["center_y"]), 2),
+            "detection_count": int(lower_left["detection_count"]),
+            "average_confidence": round(float(lower_left["average_confidence"]), 3),
+            "geometry_role": "lower_left",
+        }
+
+    if lower_right is not None:
+        identified["barrel2"] = {
+            "center_x": round(float(lower_right["center_x"]), 2),
+            "center_y": round(float(lower_right["center_y"]), 2),
+            "detection_count": int(lower_right["detection_count"]),
+            "average_confidence": round(float(lower_right["average_confidence"]), 3),
+            "geometry_role": "lower_right",
+        }
+
+    if top_cluster is not None:
+        identified["barrel3"] = {
+            "center_x": round(float(top_cluster["center_x"]), 2),
+            "center_y": round(float(top_cluster["center_y"]), 2),
+            "detection_count": int(top_cluster["detection_count"]),
+            "average_confidence": round(float(top_cluster["average_confidence"]), 3),
+            "geometry_role": "top",
+        }
+
+    return identified, geometry_named
 
 
 def identify_barrels(all_barrel_detections, width, height):
     points = flatten_barrel_points(all_barrel_detections)
     clusters = cluster_barrel_points(points, width, height, max_clusters=3, iterations=12)
+    identified, geometry_named = assign_geometry_barrels_from_clusters(clusters)
 
-    identified = {
-        "barrel1": None,
-        "barrel2": None,
-        "barrel3": None,
+    geometry_summary = {
+        "top": None,
+        "lower_left": None,
+        "lower_right": None,
     }
 
-    for idx, cluster in enumerate(clusters):
-        if idx >= 3:
-            break
-
-        label = BARREL_LABELS[idx]
-        identified[label] = {
+    for key, cluster in geometry_named.items():
+        if cluster is None:
+            continue
+        geometry_summary[key] = {
             "center_x": round(float(cluster["center_x"]), 2),
             "center_y": round(float(cluster["center_y"]), 2),
             "detection_count": int(cluster["detection_count"]),
             "average_confidence": round(float(cluster["average_confidence"]), 3),
         }
 
-    return identified
+    return identified, geometry_summary
 
 
 def build_frame_metrics(sampled_frames, identified_barrels):
@@ -758,6 +929,159 @@ def build_turns(frame_metrics, width, height):
     }
 
 
+def invert_label_map(actual_to_provisional_map):
+    return {v: k for k, v in actual_to_provisional_map.items()}
+
+
+def remap_barrel_keyed_dict(provisional_dict, actual_to_provisional_map):
+    remapped = {}
+    for actual_label in BARREL_LABELS:
+        provisional_label = actual_to_provisional_map.get(actual_label)
+        remapped[actual_label] = provisional_dict.get(provisional_label) if provisional_label else None
+    return remapped
+
+
+def remap_frame_metric_labels(metrics, actual_to_provisional_map):
+    provisional_to_actual = invert_label_map(actual_to_provisional_map)
+    remapped = []
+
+    for metric in metrics:
+        new_metric = dict(metric)
+
+        new_metric["dist_to_barrel1_px"] = metric.get(
+            f"dist_to_{actual_to_provisional_map['barrel1']}_px"
+        )
+        new_metric["dist_to_barrel2_px"] = metric.get(
+            f"dist_to_{actual_to_provisional_map['barrel2']}_px"
+        )
+        new_metric["dist_to_barrel3_px"] = metric.get(
+            f"dist_to_{actual_to_provisional_map['barrel3']}_px"
+        )
+
+        provisional_nearest = metric.get("nearest_barrel")
+        new_metric["nearest_barrel"] = (
+            provisional_to_actual.get(provisional_nearest)
+            if provisional_nearest is not None
+            else None
+        )
+
+        remapped.append(new_metric)
+
+    return remapped
+
+
+def detect_pattern_direction(provisional_turns, provisional_frame_metrics):
+    """
+    Provisional barrel mapping before direction detection:
+    - barrel1 = lower-left
+    - barrel2 = lower-right
+    - barrel3 = top
+
+    Final actual mapping:
+    LEFT pattern:
+      actual barrel1 <- provisional barrel1
+      actual barrel2 <- provisional barrel2
+      actual barrel3 <- provisional barrel3
+
+    RIGHT pattern:
+      actual barrel1 <- provisional barrel2
+      actual barrel2 <- provisional barrel1
+      actual barrel3 <- provisional barrel3
+    """
+    left_turn = provisional_turns.get("barrel1")
+    right_turn = provisional_turns.get("barrel2")
+
+    identity_map = {
+        "barrel1": "barrel1",
+        "barrel2": "barrel2",
+        "barrel3": "barrel3",
+    }
+    right_first_map = {
+        "barrel1": "barrel2",
+        "barrel2": "barrel1",
+        "barrel3": "barrel3",
+    }
+
+    if (
+        left_turn is not None
+        and right_turn is not None
+        and left_turn.get("apex_timestamp_seconds") is not None
+        and right_turn.get("apex_timestamp_seconds") is not None
+    ):
+        left_time = float(left_turn["apex_timestamp_seconds"])
+        right_time = float(right_turn["apex_timestamp_seconds"])
+
+        if abs(left_time - right_time) > PATTERN_APEX_TIME_TOLERANCE_SECONDS:
+            if right_time < left_time:
+                return {
+                    "pattern_direction": "right",
+                    "actual_to_provisional_map": right_first_map,
+                    "reason": "right-side lower barrel apex occurred earlier than left-side lower barrel apex",
+                    "confidence": 0.95,
+                    "method": "turn_apex_timing",
+                    "provisional_left_apex_seconds": round(left_time, 3),
+                    "provisional_right_apex_seconds": round(right_time, 3),
+                }
+            return {
+                "pattern_direction": "left",
+                "actual_to_provisional_map": identity_map,
+                "reason": "left-side lower barrel apex occurred earlier than right-side lower barrel apex",
+                "confidence": 0.95,
+                "method": "turn_apex_timing",
+                "provisional_left_apex_seconds": round(left_time, 3),
+                "provisional_right_apex_seconds": round(right_time, 3),
+            }
+
+    early_candidates = []
+    for metric in provisional_frame_metrics:
+        if not metric.get("horse_detected"):
+            continue
+        nearest = metric.get("nearest_barrel")
+        if nearest in ("barrel1", "barrel2"):
+            early_candidates.append(metric)
+        if len(early_candidates) >= 4:
+            break
+
+    left_votes = 0
+    right_votes = 0
+
+    for metric in early_candidates:
+        nearest = metric.get("nearest_barrel")
+        if nearest == "barrel1":
+            left_votes += 1
+        elif nearest == "barrel2":
+            right_votes += 1
+
+    if right_votes > left_votes:
+        return {
+            "pattern_direction": "right",
+            "actual_to_provisional_map": right_first_map,
+            "reason": "early horse approach favored the right-side lower barrel",
+            "confidence": 0.65,
+            "method": "early_approach_vote",
+            "provisional_left_apex_seconds": round_or_none(
+                left_turn.get("apex_timestamp_seconds") if left_turn else None, 3
+            ),
+            "provisional_right_apex_seconds": round_or_none(
+                right_turn.get("apex_timestamp_seconds") if right_turn else None, 3
+            ),
+        }
+
+    return {
+        "pattern_direction": "left",
+        "actual_to_provisional_map": identity_map,
+        "reason": "defaulted to left pattern because turn timing was inconclusive or early approach favored the left side",
+        "confidence": 0.55,
+        "method": "fallback_left",
+        "provisional_left_apex_seconds": round_or_none(
+            left_turn.get("apex_timestamp_seconds") if left_turn else None, 3
+        ),
+        "provisional_right_apex_seconds": round_or_none(
+            right_turn.get("apex_timestamp_seconds") if right_turn else None, 3
+        ),
+    }
+
+
 def get_motion_metric_by_frame(motion_samples, frame_index):
     for m in motion_samples:
         if int(m["frame_index"]) == int(frame_index):
@@ -839,6 +1163,13 @@ def build_barrel_metrics(turns, motion_samples, identified_barrels):
         if apex_sample and end_sample:
             exit_angle_deg = angle_degrees(apex_sample["horse_center"], end_sample["horse_center"])
 
+        entry_speed_avg = average_values(entry_speeds)
+        exit_speed_avg = average_values(exit_speeds)
+
+        speed_retention_ratio = None
+        if entry_speed_avg is not None and entry_speed_avg > 1e-9 and exit_speed_avg is not None:
+            speed_retention_ratio = exit_speed_avg / entry_speed_avg
+
         metrics[barrel_name] = {
             "start_frame": int(turn["start_frame"]),
             "apex_frame": int(turn["apex_frame"]),
@@ -848,8 +1179,9 @@ def build_barrel_metrics(turns, motion_samples, identified_barrels):
             "end_timestamp_seconds": turn["end_timestamp_seconds"],
             "min_distance_px": round_or_none(turn["min_distance_px"], 2),
             "average_turn_distance_px": round_or_none(average_values(turn_distances), 2),
-            "entry_speed_px_per_sec": round_or_none(average_values(entry_speeds), 2),
-            "exit_speed_px_per_sec": round_or_none(average_values(exit_speeds), 2),
+            "entry_speed_px_per_sec": round_or_none(entry_speed_avg, 2),
+            "exit_speed_px_per_sec": round_or_none(exit_speed_avg, 2),
+            "speed_retention_ratio": round_or_none(speed_retention_ratio, 3),
             "path_length_px": round_or_none(path_length_px, 2),
             "heading_change_deg": round_or_none(heading_change, 2),
             "entry_angle_deg": round_or_none(entry_angle_deg, 2),
@@ -917,6 +1249,7 @@ def choose_best_barrel(barrel_metrics):
         avg_turn_distance = metric.get("average_turn_distance_px")
         heading_change = metric.get("heading_change_deg")
         exit_speed = metric.get("exit_speed_px_per_sec")
+        speed_retention = metric.get("speed_retention_ratio")
 
         if avg_turn_distance is not None:
             score -= avg_turn_distance * 0.25
@@ -924,6 +1257,8 @@ def choose_best_barrel(barrel_metrics):
             score += heading_change * 0.35
         if exit_speed is not None:
             score += exit_speed * 0.02
+        if speed_retention is not None:
+            score += speed_retention * 18.0
 
         candidates.append((barrel_name, score))
 
@@ -944,13 +1279,16 @@ def choose_best_turn(barrel_metrics):
         path_length = metric.get("path_length_px")
         min_distance = metric.get("min_distance_px")
         heading_change = metric.get("heading_change_deg")
+        speed_retention = metric.get("speed_retention_ratio")
 
         if path_length is not None:
             score -= path_length * 0.02
         if min_distance is not None:
-            score -= min_distance * 0.2
+            score -= abs(min_distance - 80.0) * 0.18
         if heading_change is not None:
             score += heading_change * 0.3
+        if speed_retention is not None:
+            score += speed_retention * 15.0
 
         candidates.append((barrel_name, score))
 
@@ -960,7 +1298,546 @@ def choose_best_turn(barrel_metrics):
     return max(candidates, key=lambda x: x[1])[0]
 
 
-def build_insights(barrel_metrics, splits, identified_barrels):
+def compute_metric_score(value, ideal_min, ideal_max, hard_min, hard_max):
+    if value is None:
+        return None
+
+    value = float(value)
+
+    if value < hard_min or value > hard_max:
+        return 0.0
+
+    if ideal_min <= value <= ideal_max:
+        return 100.0
+
+    if value < ideal_min:
+        span = max(ideal_min - hard_min, 1e-9)
+        return max(0.0, 100.0 * (value - hard_min) / span)
+
+    span = max(hard_max - ideal_max, 1e-9)
+    return max(0.0, 100.0 * (hard_max - value) / span)
+
+
+def dedupe_points(points, min_dist=1e-6):
+    if not points:
+        return []
+
+    deduped = [points[0]]
+    for pt in points[1:]:
+        if distance(pt, deduped[-1]) > min_dist:
+            deduped.append(pt)
+    return deduped
+
+
+def resample_polyline(points, num_samples=120):
+    points = dedupe_points(points)
+    if not points:
+        return []
+    if len(points) == 1:
+        return [points[0] for _ in range(num_samples)]
+
+    segment_lengths = []
+    cumulative = [0.0]
+    total = 0.0
+
+    for i in range(1, len(points)):
+        seg_len = distance(points[i - 1], points[i])
+        segment_lengths.append(seg_len)
+        total += seg_len
+        cumulative.append(total)
+
+    if total <= 1e-9:
+        return [points[0] for _ in range(num_samples)]
+
+    samples = []
+    for i in range(num_samples):
+        target = (total * i) / max(num_samples - 1, 1)
+
+        seg_index = 0
+        while seg_index < len(segment_lengths) - 1 and cumulative[seg_index + 1] < target:
+            seg_index += 1
+
+        start_len = cumulative[seg_index]
+        end_len = cumulative[seg_index + 1]
+        p1 = points[seg_index]
+        p2 = points[seg_index + 1]
+
+        if end_len - start_len <= 1e-9:
+            samples.append((float(p1[0]), float(p1[1])))
+            continue
+
+        t = (target - start_len) / (end_len - start_len)
+        x = float(p1[0]) + t * (float(p2[0]) - float(p1[0]))
+        y = float(p1[1]) + t * (float(p2[1]) - float(p1[1]))
+        samples.append((x, y))
+
+    return samples
+
+
+def percentile(values, pct):
+    values = sorted(float(v) for v in values)
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+
+    pos = (len(values) - 1) * (pct / 100.0)
+    low = int(math.floor(pos))
+    high = int(math.ceil(pos))
+
+    if low == high:
+        return values[low]
+
+    frac = pos - low
+    return values[low] * (1.0 - frac) + values[high] * frac
+
+
+def mirror_points_horiz(points):
+    return [(1.0 - float(x), float(y)) for x, y in points]
+
+
+def build_right_hand_ideal_template_waypoints():
+    """
+    Approximation of the ideal path image the user provided.
+    This is a normalized right-hand-first cloverleaf template.
+    """
+    return [
+        (0.50, 1.02),  # home / entry
+        (0.56, 0.96),
+        (0.64, 0.90),
+        (0.72, 0.82),
+        (0.80, 0.74),  # approach B1
+        (0.88, 0.66),
+        (0.90, 0.74),
+        (0.88, 0.84),
+        (0.80, 0.90),  # exit B1
+        (0.68, 0.88),
+        (0.54, 0.84),
+        (0.40, 0.78),
+        (0.26, 0.72),  # crossover to B2
+        (0.14, 0.66),
+        (0.10, 0.74),
+        (0.12, 0.84),
+        (0.20, 0.88),
+        (0.32, 0.82),  # exit B2
+        (0.42, 0.70),
+        (0.48, 0.54),
+        (0.50, 0.38),
+        (0.50, 0.22),  # approach B3
+        (0.42, 0.14),
+        (0.52, 0.10),
+        (0.60, 0.16),
+        (0.60, 0.28),
+        (0.56, 0.44),  # exit B3
+        (0.52, 0.62),
+        (0.50, 0.80),
+        (0.50, 1.04),  # home
+    ]
+
+
+def build_ideal_template_path(direction, num_samples=140):
+    right_hand_points = build_right_hand_ideal_template_waypoints()
+
+    if direction == "left":
+        path = mirror_points_horiz(right_hand_points)
+    else:
+        path = right_hand_points
+
+    return resample_polyline(path, num_samples=num_samples)
+
+
+def build_canonical_barrel_positions_for_direction(direction):
+    if direction == "left":
+        return {
+            "barrel1": (CANONICAL_LEFT_BARREL_X, CANONICAL_LOWER_BARREL_Y),
+            "barrel2": (CANONICAL_RIGHT_BARREL_X, CANONICAL_LOWER_BARREL_Y),
+            "barrel3": (CANONICAL_TOP_BARREL_X, CANONICAL_TOP_BARREL_Y),
+        }
+
+    return {
+        "barrel1": (CANONICAL_RIGHT_BARREL_X, CANONICAL_LOWER_BARREL_Y),
+        "barrel2": (CANONICAL_LEFT_BARREL_X, CANONICAL_LOWER_BARREL_Y),
+        "barrel3": (CANONICAL_TOP_BARREL_X, CANONICAL_TOP_BARREL_Y),
+    }
+
+
+def build_normalized_actual_path(smoothed_points, barrel_geometry):
+    if not smoothed_points or not barrel_geometry:
+        return {
+            "normalized_path": [],
+            "transform": None,
+        }
+
+    top = barrel_geometry.get("top")
+    lower_left = barrel_geometry.get("lower_left")
+    lower_right = barrel_geometry.get("lower_right")
+
+    if top is None or lower_left is None or lower_right is None:
+        return {
+            "normalized_path": [],
+            "transform": None,
+        }
+
+    left_x = float(lower_left["center_x"])
+    right_x = float(lower_right["center_x"])
+    top_y = float(top["center_y"])
+    lower_avg_y = (float(lower_left["center_y"]) + float(lower_right["center_y"])) / 2.0
+
+    if abs(right_x - left_x) < 1e-6 or lower_avg_y <= top_y:
+        return {
+            "normalized_path": [],
+            "transform": None,
+        }
+
+    max_path_y = max(float(p[1]) for p in smoothed_points)
+    vertical_span = max(lower_avg_y - top_y, 1.0)
+
+    # Choose a home line that maps lower barrels near canonical lower barrel y
+    estimated_home_y_from_layout = top_y + vertical_span * (
+        (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y) /
+        max(CANONICAL_LOWER_BARREL_Y - CANONICAL_TOP_BARREL_Y, 1e-9)
+    )
+    estimated_home_y = max(max_path_y, estimated_home_y_from_layout)
+
+    normalized = []
+    for x, y in smoothed_points:
+        nx = CANONICAL_LEFT_BARREL_X + (
+            (float(x) - left_x) / (right_x - left_x)
+        ) * (CANONICAL_RIGHT_BARREL_X - CANONICAL_LEFT_BARREL_X)
+
+        ny = CANONICAL_TOP_BARREL_Y + (
+            (float(y) - top_y) / max(estimated_home_y - top_y, 1e-9)
+        ) * (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y)
+
+        normalized.append((float(nx), float(ny)))
+
+    return {
+        "normalized_path": normalized,
+        "transform": {
+            "left_x": round(left_x, 3),
+            "right_x": round(right_x, 3),
+            "top_y": round(top_y, 3),
+            "lower_avg_y": round(lower_avg_y, 3),
+            "estimated_home_y": round(float(estimated_home_y), 3),
+        },
+    }
+
+
+def build_normalized_barrel_centers(identified_barrels, barrel_geometry, direction):
+    norm_result = {}
+    dummy_path = []
+
+    for barrel_name in BARREL_LABELS:
+        barrel_info = identified_barrels.get(barrel_name)
+        if barrel_info is not None:
+            dummy_path.append((float(barrel_info["center_x"]), float(barrel_info["center_y"])))
+        else:
+            dummy_path.append(None)
+
+    top = barrel_geometry.get("top")
+    lower_left = barrel_geometry.get("lower_left")
+    lower_right = barrel_geometry.get("lower_right")
+
+    if top is None or lower_left is None or lower_right is None:
+        return {
+            "barrel1": None,
+            "barrel2": None,
+            "barrel3": None,
+        }
+
+    left_x = float(lower_left["center_x"])
+    right_x = float(lower_right["center_x"])
+    top_y = float(top["center_y"])
+    lower_avg_y = (float(lower_left["center_y"]) + float(lower_right["center_y"])) / 2.0
+
+    if abs(right_x - left_x) < 1e-6 or lower_avg_y <= top_y:
+        return {
+            "barrel1": None,
+            "barrel2": None,
+            "barrel3": None,
+        }
+
+    vertical_span = max(lower_avg_y - top_y, 1.0)
+    estimated_home_y = top_y + vertical_span * (
+        (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y) /
+        max(CANONICAL_LOWER_BARREL_Y - CANONICAL_TOP_BARREL_Y, 1e-9)
+    )
+
+    for barrel_name in BARREL_LABELS:
+        barrel_info = identified_barrels.get(barrel_name)
+        if barrel_info is None:
+            norm_result[barrel_name] = None
+            continue
+
+        x = float(barrel_info["center_x"])
+        y = float(barrel_info["center_y"])
+
+        nx = CANONICAL_LEFT_BARREL_X + (
+            (x - left_x) / (right_x - left_x)
+        ) * (CANONICAL_RIGHT_BARREL_X - CANONICAL_LEFT_BARREL_X)
+
+        ny = CANONICAL_TOP_BARREL_Y + (
+            (y - top_y) / max(estimated_home_y - top_y, 1e-9)
+        ) * (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y)
+
+        norm_result[barrel_name] = [round(nx, 4), round(ny, 4)]
+
+    return norm_result
+
+
+def compare_paths(actual_path, ideal_path):
+    if not actual_path or not ideal_path or len(actual_path) < 4 or len(ideal_path) < 4:
+        return None
+
+    sample_count = 120
+    actual_resampled = resample_polyline(actual_path, sample_count)
+    ideal_resampled = resample_polyline(ideal_path, sample_count)
+
+    pointwise_distances = [
+        distance(actual_resampled[i], ideal_resampled[i])
+        for i in range(sample_count)
+    ]
+
+    mean_distance = sum(pointwise_distances) / len(pointwise_distances)
+    median_distance = percentile(pointwise_distances, 50)
+    p90_distance = percentile(pointwise_distances, 90)
+    max_distance = max(pointwise_distances) if pointwise_distances else None
+
+    mean_score = 100.0 * (1.0 - (mean_distance / IDEAL_PATH_MEAN_DISTANCE_BAD))
+    p90_score = 100.0 * (1.0 - (p90_distance / IDEAL_PATH_P90_DISTANCE_BAD))
+    max_score = 100.0 * (1.0 - (max_distance / IDEAL_PATH_MAX_DISTANCE_BAD))
+
+    overall_score = (
+        clamp(mean_score, 0.0, 100.0) * 0.50 +
+        clamp(p90_score, 0.0, 100.0) * 0.35 +
+        clamp(max_score, 0.0, 100.0) * 0.15
+    )
+
+    segments = {
+        "start_to_barrel1": (0, 30),
+        "barrel1_to_barrel2": (30, 70),
+        "barrel2_to_barrel3": (70, 100),
+        "barrel3_to_home": (100, 120),
+    }
+
+    segment_scores = {}
+    for name, (start_idx, end_idx) in segments.items():
+        seg_values = pointwise_distances[start_idx:end_idx]
+        if not seg_values:
+            segment_scores[name] = None
+            continue
+        seg_mean = sum(seg_values) / len(seg_values)
+        seg_score = 100.0 * (1.0 - (seg_mean / IDEAL_PATH_MEAN_DISTANCE_BAD))
+        segment_scores[name] = round(clamp(seg_score, 0.0, 100.0), 1)
+
+    return {
+        "sample_count": sample_count,
+        "mean_distance": round_or_none(mean_distance, 4),
+        "median_distance": round_or_none(median_distance, 4),
+        "p90_distance": round_or_none(p90_distance, 4),
+        "max_distance": round_or_none(max_distance, 4),
+        "overall_score": round_or_none(overall_score, 1),
+        "segment_scores": segment_scores,
+        "actual_resampled_path": [round_point(p, 4) for p in actual_resampled],
+        "ideal_resampled_path": [round_point(p, 4) for p in ideal_resampled],
+    }
+
+
+def build_template_barrel_deviation_scores(normalized_barrels, direction):
+    canonical = build_canonical_barrel_positions_for_direction(direction)
+    scores = {}
+    notes = {}
+
+    for barrel_name in BARREL_LABELS:
+        actual = normalized_barrels.get(barrel_name)
+        ideal = canonical.get(barrel_name)
+
+        if actual is None or ideal is None:
+            scores[barrel_name] = None
+            notes[barrel_name] = "insufficient barrel geometry"
+            continue
+
+        dev = distance(actual, ideal)
+        score = 100.0 * (1.0 - (dev / 0.12))
+        score = clamp(score, 0.0, 100.0)
+
+        scores[barrel_name] = round(score, 1)
+
+        if dev <= 0.035:
+            notes[barrel_name] = "barrel placement aligns well with template"
+        elif dev <= 0.07:
+            notes[barrel_name] = "barrel placement moderately aligned with template"
+        else:
+            notes[barrel_name] = "barrel layout or normalization deviates from template"
+
+    return scores, notes
+
+
+def build_pattern_analysis(
+    barrel_metrics,
+    splits,
+    pattern_direction_info,
+    identified_barrels,
+    tracking_quality,
+    template_path_comparison=None,
+    template_barrel_scores=None,
+):
+    per_barrel_scores = {}
+    per_barrel_notes = {}
+
+    for barrel_name in BARREL_LABELS:
+        metric = barrel_metrics.get(barrel_name)
+        if metric is None:
+            per_barrel_scores[barrel_name] = None
+            per_barrel_notes[barrel_name] = "insufficient data"
+            continue
+
+        pocket_score = compute_metric_score(
+            metric.get("min_distance_px"),
+            ideal_min=55,
+            ideal_max=110,
+            hard_min=20,
+            hard_max=180,
+        )
+        wrap_score = compute_metric_score(
+            metric.get("heading_change_deg"),
+            ideal_min=55,
+            ideal_max=115,
+            hard_min=20,
+            hard_max=150,
+        )
+        retention_score = compute_metric_score(
+            metric.get("speed_retention_ratio"),
+            ideal_min=0.92,
+            ideal_max=1.25,
+            hard_min=0.55,
+            hard_max=1.60,
+        )
+        radius_score = compute_metric_score(
+            metric.get("average_turn_distance_px"),
+            ideal_min=65,
+            ideal_max=115,
+            hard_min=30,
+            hard_max=190,
+        )
+
+        components = [pocket_score, wrap_score, retention_score, radius_score]
+        usable = [c for c in components if c is not None]
+
+        if not usable:
+            per_barrel_scores[barrel_name] = None
+            per_barrel_notes[barrel_name] = "insufficient data"
+            continue
+
+        barrel_score = sum(usable) / len(usable)
+
+        if template_barrel_scores and template_barrel_scores.get(barrel_name) is not None:
+            barrel_score = (barrel_score * 0.75) + (float(template_barrel_scores[barrel_name]) * 0.25)
+
+        per_barrel_scores[barrel_name] = round(barrel_score, 1)
+
+        notes = []
+        min_distance = metric.get("min_distance_px")
+        heading_change = metric.get("heading_change_deg")
+        speed_retention = metric.get("speed_retention_ratio")
+
+        if min_distance is not None:
+            if min_distance < 50:
+                notes.append("too tight")
+            elif min_distance > 115:
+                notes.append("too wide")
+            else:
+                notes.append("pocket acceptable")
+
+        if heading_change is not None:
+            if heading_change < 50:
+                notes.append("flat wrap")
+            elif heading_change > 115:
+                notes.append("aggressive wrap")
+            else:
+                notes.append("turn shape acceptable")
+
+        if speed_retention is not None:
+            if speed_retention < 0.85:
+                notes.append("lost speed on exit")
+            elif speed_retention > 1.0:
+                notes.append("good exit drive")
+            else:
+                notes.append("exit speed stable")
+
+        per_barrel_notes[barrel_name] = "; ".join(notes[:3]) if notes else "no notes"
+
+    detected_barrel_count = sum(1 for v in identified_barrels.values() if v is not None)
+
+    sequence_score = 100.0
+    b1 = barrel_metrics.get("barrel1")
+    b2 = barrel_metrics.get("barrel2")
+    b3 = barrel_metrics.get("barrel3")
+
+    if not b1 or not b2 or not b3:
+        sequence_score = 35.0
+    else:
+        t1 = b1.get("apex_timestamp_seconds")
+        t2 = b2.get("apex_timestamp_seconds")
+        t3 = b3.get("apex_timestamp_seconds")
+
+        if t1 is None or t2 is None or t3 is None:
+            sequence_score = 35.0
+        elif not (t1 < t2 < t3):
+            sequence_score = 15.0
+
+    tracking_score = clamp(float(tracking_quality.get("horse_detection_rate", 0.0)) * 100.0, 0.0, 100.0)
+    barrel_count_score = 100.0 if detected_barrel_count == 3 else (66.0 if detected_barrel_count == 2 else 20.0)
+
+    barrel_score_values = [v for v in per_barrel_scores.values() if v is not None]
+    average_barrel_score = sum(barrel_score_values) / len(barrel_score_values) if barrel_score_values else None
+
+    template_path_score = None
+    if template_path_comparison and template_path_comparison.get("overall_score") is not None:
+        template_path_score = float(template_path_comparison["overall_score"])
+
+    overall_components = [
+        average_barrel_score,
+        sequence_score,
+        tracking_score,
+        barrel_count_score,
+        template_path_score,
+    ]
+    usable_overall = [v for v in overall_components if v is not None]
+    overall_score = sum(usable_overall) / len(usable_overall) if usable_overall else None
+
+    return {
+        "pattern_direction": pattern_direction_info.get("pattern_direction"),
+        "direction_confidence": round_or_none(pattern_direction_info.get("confidence"), 3),
+        "direction_method": pattern_direction_info.get("method"),
+        "direction_reason": pattern_direction_info.get("reason"),
+        "overall_score": round_or_none(overall_score, 1),
+        "average_barrel_score": round_or_none(average_barrel_score, 1),
+        "sequence_score": round_or_none(sequence_score, 1),
+        "tracking_score": round_or_none(tracking_score, 1),
+        "barrel_count_score": round_or_none(barrel_count_score, 1),
+        "template_path_score": round_or_none(template_path_score, 1),
+        "per_barrel_scores": per_barrel_scores,
+        "per_barrel_notes": per_barrel_notes,
+        "detected_barrel_count": detected_barrel_count,
+        "sequence_valid": bool(
+            b1 and b2 and b3
+            and b1.get("apex_timestamp_seconds") is not None
+            and b2.get("apex_timestamp_seconds") is not None
+            and b3.get("apex_timestamp_seconds") is not None
+            and b1["apex_timestamp_seconds"] < b2["apex_timestamp_seconds"] < b3["apex_timestamp_seconds"]
+        ),
+        "splits": splits,
+    }
+
+
+def build_insights(
+    barrel_metrics,
+    splits,
+    identified_barrels,
+    pattern_analysis,
+    template_path_comparison=None,
+):
     insights = []
 
     detected_barrel_count = sum(1 for v in identified_barrels.values() if v is not None)
@@ -968,6 +1845,30 @@ def build_insights(barrel_metrics, splits, identified_barrels):
         insights.append(
             "Barrel identification is incomplete. The detector found fewer than three stable barrel positions, so turn analysis is limited."
         )
+
+    if pattern_analysis.get("pattern_direction"):
+        insights.append(
+            f"Detected {pattern_analysis['pattern_direction']}-hand pattern with confidence {pattern_analysis.get('direction_confidence')}."
+        )
+
+    if pattern_analysis.get("overall_score") is not None:
+        insights.append(
+            f"Overall pattern score: {pattern_analysis['overall_score']}/100."
+        )
+
+    if template_path_comparison and template_path_comparison.get("overall_score") is not None:
+        insights.append(
+            f"Ideal path comparison score: {template_path_comparison['overall_score']}/100."
+        )
+
+        mean_distance = template_path_comparison.get("mean_distance")
+        if mean_distance is not None:
+            if mean_distance <= 0.045:
+                insights.append("Actual path stayed close to the ideal template for most of the run.")
+            elif mean_distance <= 0.08:
+                insights.append("Actual path moderately followed the ideal template but still showed measurable drift.")
+            else:
+                insights.append("Actual path deviated materially from the ideal template.")
 
     for barrel_name in BARREL_LABELS:
         metric = barrel_metrics.get(barrel_name)
@@ -979,39 +1880,45 @@ def build_insights(barrel_metrics, splits, identified_barrels):
         exit_speed = metric.get("exit_speed_px_per_sec")
         heading_change = metric.get("heading_change_deg")
         avg_turn_distance = metric.get("average_turn_distance_px")
+        speed_retention = metric.get("speed_retention_ratio")
 
         label = barrel_name.upper()
 
-        if min_distance is not None and min_distance < 45:
+        if min_distance is not None and min_distance < 50:
             insights.append(
-                f"{label}: you likely crowded the barrel. Minimum distance was only {min_distance:.1f}px, which suggests a very tight pocket."
+                f"{label}: pocket appears too tight. Minimum distance was {min_distance:.1f}px."
             )
-        elif min_distance is not None and min_distance > 120:
+        elif min_distance is not None and min_distance > 115:
             insights.append(
-                f"{label}: the turn appears wide. Minimum distance was {min_distance:.1f}px, which usually means extra path length around the barrel."
+                f"{label}: turn appears wide. Minimum distance was {min_distance:.1f}px."
             )
 
         if entry_speed is not None and exit_speed is not None:
             speed_delta = exit_speed - entry_speed
             if speed_delta < -25:
                 insights.append(
-                    f"{label}: exit speed dropped versus entry speed. That usually means momentum was lost through the turn."
+                    f"{label}: exit speed dropped versus entry speed. Momentum was probably lost through the turn."
                 )
             elif speed_delta > 15:
                 insights.append(
-                    f"{label}: strong acceleration out of the turn. Exit speed improved after the apex."
+                    f"{label}: strong acceleration out of the turn."
                 )
 
-        if heading_change is not None and heading_change < 35:
+        if speed_retention is not None and speed_retention < 0.85:
             insights.append(
-                f"{label}: heading change through the turn was limited, which can indicate a flatter arc instead of a committed wrap."
-            )
-        elif heading_change is not None and heading_change > 95:
-            insights.append(
-                f"{label}: heading change was aggressive. That can indicate a strong wrap, but only if the exit line stays clean."
+                f"{label}: poor speed retention through the turn."
             )
 
-        if avg_turn_distance is not None and avg_turn_distance > 140:
+        if heading_change is not None and heading_change < 50:
+            insights.append(
+                f"{label}: heading change was limited, which suggests a flatter turn shape."
+            )
+        elif heading_change is not None and heading_change > 115:
+            insights.append(
+                f"{label}: heading change was aggressive. That can be good only if the exit line stayed clean."
+            )
+
+        if avg_turn_distance is not None and avg_turn_distance > 135:
             insights.append(
                 f"{label}: average turn distance stayed high, which points to a larger-than-ideal turn radius."
             )
@@ -1036,22 +1943,21 @@ def build_insights(barrel_metrics, splits, identified_barrels):
     best_barrel = choose_best_barrel(barrel_metrics)
     if best_barrel is not None:
         insights.append(
-            f"Best barrel estimate: {best_barrel.upper()}. This barrel combined tighter geometry with stronger exit characteristics than the others."
+            f"Best barrel estimate: {best_barrel.upper()}."
         )
 
     best_turn = choose_best_turn(barrel_metrics)
     if best_turn is not None:
         insights.append(
-            f"Best turn estimate: {best_turn.upper()}. This turn appears to balance path efficiency, barrel proximity, and directional change better than the others."
+            f"Best turn estimate: {best_turn.upper()}."
         )
 
-    return insights[:12]
+    return insights[:16]
 
 
 def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, frame_index, timestamp_seconds):
     overlay = frame.copy()
 
-    # Draw current barrel detections
     for barrel in barrel_detections or []:
         x1 = int(barrel["x1"])
         y1 = int(barrel["y1"])
@@ -1071,7 +1977,6 @@ def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, 
             cv2.LINE_AA,
         )
 
-    # Draw stable identified barrels
     if identified_barrels:
         for barrel_name, barrel_info in identified_barrels.items():
             if barrel_info is None:
@@ -1090,7 +1995,6 @@ def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, 
                 cv2.LINE_AA,
             )
 
-    # Draw horse detection
     if horse_detection:
         x1, y1, x2, y2 = [int(v) for v in horse_detection["bbox"]]
         cx, cy = [int(v) for v in horse_detection["center"]]
@@ -1109,7 +2013,6 @@ def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, 
             cv2.LINE_AA,
         )
 
-    # Header text
     header_1 = f"frame {frame_index}"
     header_2 = f"time {timestamp_seconds}s" if timestamp_seconds is not None else "time unknown"
 
@@ -1215,7 +2118,6 @@ def main():
 
         previous_accepted_point = None
 
-        # Pass 1: read/sample/detect
         for idx, target_frame in enumerate(sample_indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
             ret, frame = cap.read()
@@ -1317,16 +2219,78 @@ def main():
             })
 
         barrel_detection_summary = summarize_barrel_detections(all_barrel_detections)
-        identified_barrels = identify_barrels(all_barrel_detections, original_width, original_height)
 
-        frame_metrics = build_frame_metrics(sampled_frames, identified_barrels)
+        # Geometry-only barrel identification
+        provisional_identified_barrels, barrel_geometry = identify_barrels(
+            all_barrel_detections,
+            original_width,
+            original_height,
+        )
+
+        # Provisional metrics
+        provisional_frame_metrics = build_frame_metrics(sampled_frames, provisional_identified_barrels)
+        provisional_motion_samples = build_motion_samples(provisional_frame_metrics)
+        provisional_turns = build_turns(provisional_frame_metrics, original_width, original_height)
+
+        # Direction detection and actual barrel order remap
+        pattern_direction_info = detect_pattern_direction(provisional_turns, provisional_frame_metrics)
+        actual_to_provisional_map = pattern_direction_info["actual_to_provisional_map"]
+
+        identified_barrels = remap_barrel_keyed_dict(provisional_identified_barrels, actual_to_provisional_map)
+        frame_metrics = remap_frame_metric_labels(provisional_frame_metrics, actual_to_provisional_map)
         motion_samples = build_motion_samples(frame_metrics)
-        turns = build_turns(frame_metrics, original_width, original_height)
+        turns = remap_barrel_keyed_dict(provisional_turns, actual_to_provisional_map)
+
         barrel_metrics = build_barrel_metrics(turns, motion_samples, identified_barrels)
         splits = build_splits(turns, motion_samples)
-        insights = build_insights(barrel_metrics, splits, identified_barrels)
 
-        # Pass 2: create overlays now that stable barrels are known
+        tracking_quality = {
+            "sampled_frame_count": len(sample_indices),
+            "read_success_count": read_success_count,
+            "horse_detected_count": horse_detected_count,
+            "missed_detection_count": missed_detection_count,
+            "rejected_jump_count": rejected_jump_count,
+            "max_jump_threshold_px": round(float(max_jump), 2),
+            "read_success_rate": round(read_success_count / max(len(sample_indices), 1), 4),
+            "horse_detection_rate": round(horse_detected_count / max(read_success_count, 1), 4),
+            "accepted_point_rate": round(len(accepted_points) / max(horse_detected_count, 1), 4),
+            "usable_frame_image_count": 0,
+            "usable_overlay_image_count": 0,
+        }
+
+        # Template-based pattern comparison
+        direction = pattern_direction_info.get("pattern_direction") or "right"
+        ideal_template_path = build_ideal_template_path(direction, num_samples=140)
+
+        normalized_actual_path_result = build_normalized_actual_path(smoothed_points, barrel_geometry)
+        normalized_actual_path = normalized_actual_path_result["normalized_path"]
+
+        template_path_comparison = compare_paths(normalized_actual_path, ideal_template_path)
+
+        normalized_barrels = build_normalized_barrel_centers(identified_barrels, barrel_geometry, direction)
+        template_barrel_scores, template_barrel_notes = build_template_barrel_deviation_scores(
+            normalized_barrels,
+            direction,
+        )
+
+        pattern_analysis = build_pattern_analysis(
+            barrel_metrics,
+            splits,
+            pattern_direction_info,
+            identified_barrels,
+            tracking_quality,
+            template_path_comparison=template_path_comparison,
+            template_barrel_scores=template_barrel_scores,
+        )
+
+        insights = build_insights(
+            barrel_metrics,
+            splits,
+            identified_barrels,
+            pattern_analysis,
+            template_path_comparison=template_path_comparison,
+        )
+
         usable_frame_image_count = 0
         usable_overlay_image_count = 0
 
@@ -1366,28 +2330,19 @@ def main():
                 smoothed_points,
                 path_map_path,
                 identified_barrels=identified_barrels,
+                normalized_actual_path=template_path_comparison["actual_resampled_path"] if template_path_comparison else None,
+                template_path=template_path_comparison["ideal_resampled_path"] if template_path_comparison else None,
             )
 
-        tracking_quality = {
-            "sampled_frame_count": len(sample_indices),
-            "read_success_count": read_success_count,
-            "horse_detected_count": horse_detected_count,
-            "missed_detection_count": missed_detection_count,
-            "rejected_jump_count": rejected_jump_count,
-            "max_jump_threshold_px": round(float(max_jump), 2),
-            "read_success_rate": round(read_success_count / max(len(sample_indices), 1), 4),
-            "horse_detection_rate": round(horse_detected_count / max(read_success_count, 1), 4),
-            "accepted_point_rate": round(len(accepted_points) / max(horse_detected_count, 1), 4),
-            "usable_frame_image_count": usable_frame_image_count,
-            "usable_overlay_image_count": usable_overlay_image_count,
-        }
+        tracking_quality["usable_frame_image_count"] = usable_frame_image_count
+        tracking_quality["usable_overlay_image_count"] = usable_overlay_image_count
 
         smoothed_path_points = [round_point(pt, 2) for pt in smoothed_points]
         normalized_smoothed_path_points = normalize_points_to_unit_box(smoothed_points)
 
         output = {
             "ok": True,
-            "message": "Video opened and barrel-aware run analysis was completed.",
+            "message": "Video opened and template-aware barrel run analysis was completed.",
             "video_path": video_path,
             "frame_count": frame_count,
             "fps": round(fps, 3),
@@ -1406,11 +2361,30 @@ def main():
 
             "tracking_quality": tracking_quality,
             "barrel_detection_summary": barrel_detection_summary,
-            "identified_barrels": identified_barrels,
+            "barrel_geometry": barrel_geometry,
 
+            # Provisional geometry before direction correction
+            "provisional_identified_barrels": provisional_identified_barrels,
+            "provisional_turns": provisional_turns,
+
+            # Final corrected output
+            "pattern_direction": direction,
+            "pattern_direction_info": pattern_direction_info,
+            "identified_barrels": identified_barrels,
             "turns": turns,
             "splits": splits,
             "barrel_metrics": barrel_metrics,
+
+            # Template-aware additions
+            "normalized_actual_path_transform": normalized_actual_path_result["transform"],
+            "normalized_actual_template_path": [round_point(p, 4) for p in normalized_actual_path],
+            "ideal_template_path": [round_point(p, 4) for p in ideal_template_path],
+            "normalized_barrel_centers": normalized_barrels,
+            "template_barrel_scores": template_barrel_scores,
+            "template_barrel_notes": template_barrel_notes,
+            "template_path_comparison": template_path_comparison,
+
+            "pattern_analysis": pattern_analysis,
             "insights": insights,
 
             "frame_metrics": frame_metrics,
