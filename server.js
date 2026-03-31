@@ -16,7 +16,8 @@ const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const EXEC_MAX_BUFFER = 1024 * 1024 * 50; // 50 MB
 const PYTHON_TIMEOUT_MS = 1000 * 60 * 12; // 12 minutes
-const JOB_TTL_MS = 1000 * 60 * 60;
+const JOB_TTL_MS = 1000 * 60 * 60; // 1 hour
+const JOB_STORE_FILE = path.join(process.cwd(), "job-store.json");
 
 const pythonExePath =
   process.env.PYTHON_PATH ||
@@ -26,11 +27,13 @@ const pythonScriptPath = path.join(process.cwd(), "python", "analyze_run.py");
 const uploadsDir = path.join(process.cwd(), "uploads");
 
 console.log("===== SERVER START =====");
+console.log("[SERVER BOOTED]", new Date().toISOString());
 console.log("Node ENV:", process.env.NODE_ENV || "development");
 console.log("Port:", PORT);
 console.log("Python Executable:", pythonExePath);
 console.log("Python Script Path:", pythonScriptPath);
 console.log("Uploads Directory:", uploadsDir);
+console.log("Job Store File:", JOB_STORE_FILE);
 console.log("========================");
 
 const openai = new OpenAI({
@@ -38,6 +41,7 @@ const openai = new OpenAI({
 });
 
 const jobs = new Map();
+const cleanupTimers = new Map();
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -211,14 +215,6 @@ function getPythonGeneratedPaths(pythonResult) {
   }
 
   return [...new Set(paths)];
-}
-
-function roundMaybe(value, digits = 2) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return null;
-  }
-
-  return Number(Number(value).toFixed(digits));
 }
 
 function buildCvSummary(run, pythonResult) {
@@ -604,6 +600,113 @@ function sanitizePythonForClient(pythonResult) {
   };
 }
 
+function serializeJobsForDisk() {
+  return Array.from(jobs.values()).map((job) => ({
+    ...job,
+  }));
+}
+
+function persistJobsToDisk() {
+  try {
+    fs.writeFileSync(
+      JOB_STORE_FILE,
+      JSON.stringify(
+        {
+          savedAt: new Date().toISOString(),
+          jobs: serializeJobsForDisk(),
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    console.error("Failed to persist jobs to disk:", error);
+  }
+}
+
+function clearCleanupTimer(jobId) {
+  const existing = cleanupTimers.get(jobId);
+  if (existing) {
+    clearTimeout(existing);
+    cleanupTimers.delete(jobId);
+  }
+}
+
+function deleteJob(jobId) {
+  clearCleanupTimer(jobId);
+  const existed = jobs.delete(jobId);
+  if (existed) {
+    console.log("[JOB DELETE]", jobId);
+    persistJobsToDisk();
+  }
+}
+
+function scheduleJobCleanup(jobId) {
+  clearCleanupTimer(jobId);
+
+  const job = jobs.get(jobId);
+  if (!job) return;
+
+  const createdMs = new Date(job.createdAt).getTime();
+  const expiresAtMs = createdMs + JOB_TTL_MS;
+  const delay = Math.max(0, expiresAtMs - Date.now());
+
+  const timer = setTimeout(() => {
+    deleteJob(jobId);
+  }, delay);
+
+  cleanupTimers.set(jobId, timer);
+}
+
+function restoreJobsFromDisk() {
+  try {
+    if (!fs.existsSync(JOB_STORE_FILE)) {
+      return;
+    }
+
+    const raw = fs.readFileSync(JOB_STORE_FILE, "utf8");
+    const parsed = safeParseJson(raw);
+
+    if (!parsed || !Array.isArray(parsed.jobs)) {
+      console.warn("Job store file exists but could not be parsed.");
+      return;
+    }
+
+    let restoredCount = 0;
+
+    for (const job of parsed.jobs) {
+      if (!job?.id || !job?.createdAt) {
+        continue;
+      }
+
+      const ageMs = Date.now() - new Date(job.createdAt).getTime();
+      if (ageMs >= JOB_TTL_MS) {
+        continue;
+      }
+
+      const restoredJob = { ...job };
+
+      if (restoredJob.status === "queued" || restoredJob.status === "running") {
+        restoredJob.status = "failed";
+        restoredJob.stage = "Failed";
+        restoredJob.completedAt = new Date().toISOString();
+        restoredJob.error =
+          "Server restarted while analysis was running. Please re-run the analysis.";
+      }
+
+      jobs.set(restoredJob.id, restoredJob);
+      scheduleJobCleanup(restoredJob.id);
+      restoredCount += 1;
+    }
+
+    console.log("[JOB RESTORE] restored jobs:", restoredCount);
+    persistJobsToDisk();
+  } catch (error) {
+    console.error("Failed to restore jobs from disk:", error);
+  }
+}
+
 function createJob({ kind, run, videoPath = null }) {
   const jobId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -624,20 +727,35 @@ function createJob({ kind, run, videoPath = null }) {
 
   jobs.set(jobId, job);
   scheduleJobCleanup(jobId);
-  return job;
-}
+  persistJobsToDisk();
 
-function scheduleJobCleanup(jobId) {
-  setTimeout(() => {
-    jobs.delete(jobId);
-  }, JOB_TTL_MS);
+  console.log("[JOB CREATED]", jobId, "kind:", kind);
+  console.log("[JOB STORED]", jobId, "exists:", jobs.has(jobId), "jobCount:", jobs.size);
+
+  return job;
 }
 
 function updateJob(jobId, updates) {
   const job = jobs.get(jobId);
-  if (!job) return null;
+  if (!job) {
+    console.warn("[JOB UPDATE MISSED]", jobId, "updates:", updates);
+    return null;
+  }
 
   Object.assign(job, updates);
+  persistJobsToDisk();
+
+  console.log(
+    "[JOB UPDATE]",
+    jobId,
+    "status:",
+    job.status,
+    "progress:",
+    job.progress,
+    "stage:",
+    job.stage
+  );
+
   return job;
 }
 
@@ -744,9 +862,13 @@ async function runPythonAnalysis(videoPath) {
 }
 
 async function processVideoJob(jobId) {
-  const job = jobs.get(jobId);
-  if (!job) return;
+  const initialJob = jobs.get(jobId);
+  if (!initialJob) {
+    console.warn("[VIDEO JOB START FAILED] job missing:", jobId);
+    return;
+  }
 
+  const videoPath = initialJob.videoPath;
   let pythonGeneratedPaths = [];
 
   try {
@@ -757,7 +879,12 @@ async function processVideoJob(jobId) {
       startedAt: new Date().toISOString(),
     });
 
-    const pythonResult = await runPythonAnalysis(job.videoPath);
+    const currentJob = jobs.get(jobId);
+    if (!currentJob) {
+      throw new Error("Job disappeared before Python analysis started.");
+    }
+
+    const pythonResult = await runPythonAnalysis(videoPath);
 
     updateJob(jobId, {
       progress: 50,
@@ -792,6 +919,11 @@ async function processVideoJob(jobId) {
       stage: "Requesting AI coaching analysis",
     });
 
+    const latestJob = jobs.get(jobId);
+    if (!latestJob) {
+      throw new Error("Job disappeared before OpenAI analysis started.");
+    }
+
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       input: [
@@ -800,7 +932,7 @@ async function processVideoJob(jobId) {
           content: [
             {
               type: "input_text",
-              text: buildVisionPrompt(job.run, pythonResult),
+              text: buildVisionPrompt(latestJob.run, pythonResult),
             },
             ...imageInputs,
           ],
@@ -849,13 +981,16 @@ async function processVideoJob(jobId) {
       error: error.message || "Video analysis failed.",
     });
   } finally {
-    safeCleanup([job.videoPath, ...pythonGeneratedPaths]);
+    safeCleanup([videoPath, ...pythonGeneratedPaths]);
   }
 }
 
 async function processTextJob(jobId) {
   const job = jobs.get(jobId);
-  if (!job) return;
+  if (!job) {
+    console.warn("[TEXT JOB START FAILED] job missing:", jobId);
+    return;
+  }
 
   try {
     updateJob(jobId, {
@@ -870,6 +1005,11 @@ async function processTextJob(jobId) {
       stage: "Requesting AI coaching analysis",
     });
 
+    const latestJob = jobs.get(jobId);
+    if (!latestJob) {
+      throw new Error("Job disappeared before text analysis started.");
+    }
+
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       input: [
@@ -878,7 +1018,7 @@ async function processTextJob(jobId) {
           content: [
             {
               type: "input_text",
-              text: buildTextOnlyPrompt(job.run),
+              text: buildTextOnlyPrompt(latestJob.run),
             },
           ],
         },
@@ -929,6 +1069,8 @@ async function processTextJob(jobId) {
 }
 
 function startJobProcessing(job) {
+  console.log("[JOB PROCESS START]", job.id, "kind:", job.kind);
+
   if (job.kind === "video") {
     void processVideoJob(job.id);
     return;
@@ -939,10 +1081,13 @@ function startJobProcessing(job) {
   }
 }
 
+restoreJobsFromDisk();
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
     message: "AI Coaching Server running",
+    activeJobs: jobs.size,
   });
 });
 
@@ -950,6 +1095,26 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     message: "AI Coaching Server running",
+    activeJobs: jobs.size,
+  });
+});
+
+app.get("/debug/jobs", (_req, res) => {
+  res.json({
+    ok: true,
+    count: jobs.size,
+    jobs: Array.from(jobs.values()).map((job) => ({
+      id: job.id,
+      kind: job.kind,
+      status: job.status,
+      progress: job.progress,
+      stage: job.stage,
+      createdAt: job.createdAt,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      error: job.error,
+      hasResult: !!job.result,
+    })),
   });
 });
 
@@ -1002,6 +1167,8 @@ app.post("/analyze-run-video/start", upload.single("video"), async (req, res) =>
 
     startJobProcessing(job);
 
+    console.log("[JOB START RESPONSE]", { jobId: job.id });
+
     return res.json({
       ok: true,
       jobId: job.id,
@@ -1031,6 +1198,8 @@ app.post("/analyze-run/start", async (req, res) => {
 
     startJobProcessing(job);
 
+    console.log("[JOB START RESPONSE]", { jobId: job.id });
+
     return res.json({
       ok: true,
       jobId: job.id,
@@ -1045,11 +1214,25 @@ app.post("/analyze-run/start", async (req, res) => {
 });
 
 app.get("/analysis-status/:jobId", (req, res) => {
-  const job = jobs.get(req.params.jobId);
+  const requestedJobId = String(req.params.jobId || "").trim();
+
+  console.log(
+    "[JOB POLL]",
+    requestedJobId,
+    "exists:",
+    jobs.has(requestedJobId),
+    "jobCount:",
+    jobs.size
+  );
+
+  const job = jobs.get(requestedJobId);
 
   if (!job) {
     return res.status(404).json({
+      ok: false,
       error: "Analysis job not found.",
+      requestedJobId,
+      activeJobCount: jobs.size,
     });
   }
 
