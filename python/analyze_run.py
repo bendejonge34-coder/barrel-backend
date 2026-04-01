@@ -35,7 +35,8 @@ BARREL_LABELS = ["barrel1", "barrel2", "barrel3"]
 HORSE_CONFIDENCE_THRESHOLD = 0.16
 BARREL_CONFIDENCE_THRESHOLD = 0.50
 
-# Increased, but not so much that Render times out
+# Balanced settings for Render: better than the old version,
+# but lighter than the timeout version
 TARGET_SAMPLE_FPS = 4.0
 MAX_SAMPLED_FRAMES = 72
 MIN_SAMPLED_FRAMES = 28
