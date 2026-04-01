@@ -1785,14 +1785,14 @@ def main():
                             rejected_jump_count += 1
                             rejection_reason = f"jump_rejected_{round(jump_distance, 2)}px"
                 else:
-                    missed_detection_count += 1
+    missed_detection_count += 1
 
-frame_file = os.path.join(output_dir, f"frame_{idx:03d}.jpg")
-wrote_frame = safe_imwrite(frame_file, frame)
-if wrote_frame and os.path.exists(frame_file):
-    image_path = frame_file
+            frame_file = os.path.join(output_dir, f"frame_{idx:03d}.jpg")
+            wrote_frame = safe_imwrite(frame_file, frame)
+            if wrote_frame and os.path.exists(frame_file):
+                image_path = frame_file
 
-            track_points.append(chosen_point_for_track)
+        track_points.append(chosen_point_for_track)
 
             sampled_frames.append({
                 "percent": round(percent, 4),
