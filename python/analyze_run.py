@@ -216,7 +216,6 @@ def build_horse_candidates(result, x_ratio=1.0, y_ratio=1.0):
         area = max(0.0, (x2 - x1) * (y2 - y1))
         height = max(0.0, y2 - y1)
 
-        # Slightly above absolute bottom is usually a more stable rider/horse path point
         tracking_point = (float(cx), float(y2 - height * 0.12))
 
         candidates.append({
@@ -999,7 +998,6 @@ def build_barrel_metrics(turns, motion_samples, identified_barrels):
             metrics[barrel_name] = None
             continue
 
-        apex_sample = get_motion_metric_by_frame(motion_samples, turn["apex_frame"])
         start_sample = get_motion_metric_by_frame(motion_samples, turn["start_frame"])
         end_sample = get_motion_metric_by_frame(motion_samples, turn["end_frame"])
 
@@ -1102,7 +1100,6 @@ def compute_speed_scores(barrel_metrics):
             continue
 
         score = 60.0
-
         score += clamp((speed_retention - 0.85) * 120.0, -25.0, 30.0)
 
         if entry_speed is not None and exit_speed is not None:
@@ -1720,7 +1717,6 @@ def main():
 
                 inference_frame, x_ratio, y_ratio = resize_for_inference(frame)
 
-                # Run barrel detection only on every other sampled frame to reduce load
                 if idx % 2 == 0:
                     barrel_detections_resized = detect_barrels_in_frame(
                         inference_frame,
@@ -1785,14 +1781,14 @@ def main():
                             rejected_jump_count += 1
                             rejection_reason = f"jump_rejected_{round(jump_distance, 2)}px"
                 else:
-    missed_detection_count += 1
+                    missed_detection_count += 1
 
-            frame_file = os.path.join(output_dir, f"frame_{idx:03d}.jpg")
-            wrote_frame = safe_imwrite(frame_file, frame)
-            if wrote_frame and os.path.exists(frame_file):
-                image_path = frame_file
+                frame_file = os.path.join(output_dir, f"frame_{idx:03d}.jpg")
+                wrote_frame = safe_imwrite(frame_file, frame)
+                if wrote_frame and os.path.exists(frame_file):
+                    image_path = frame_file
 
-        track_points.append(chosen_point_for_track)
+            track_points.append(chosen_point_for_track)
 
             sampled_frames.append({
                 "percent": round(percent, 4),
