@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile);
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const EXEC_MAX_BUFFER = 1024 * 1024 * 50; // 50 MB
-const PYTHON_TIMEOUT_MS = 1000 * 60 * 12; // 12 minutes
+const PYTHON_TIMEOUT_MS = 1000 * 60 * 8; // 8 minutes
 const JOB_TTL_MS = 1000 * 60 * 60; // 1 hour
 const JOB_STORE_FILE = path.join(process.cwd(), "job-store.json");
 
@@ -123,7 +123,7 @@ function extractLastJsonObject(text) {
   try {
     return JSON.parse(raw);
   } catch {
-    // keep trying
+    // continue
   }
 
   const end = raw.lastIndexOf("}");
@@ -135,18 +135,17 @@ function extractLastJsonObject(text) {
     start = raw.lastIndexOf("{", start - 1)
   ) {
     const candidate = raw.slice(start, end + 1);
-
     try {
       return JSON.parse(candidate);
     } catch {
-      // keep trying earlier opening braces
+      // continue
     }
   }
 
   return null;
 }
 
-function previewText(text, max = 1200) {
+function previewText(text, max = 1000) {
   return String(text || "").slice(0, max);
 }
 
@@ -217,311 +216,146 @@ function getPythonGeneratedPaths(pythonResult) {
   return [...new Set(paths)];
 }
 
-function buildCvSummary(run, pythonResult) {
-  const sampledFrames = Array.isArray(pythonResult?.sampled_frames)
-    ? pythonResult.sampled_frames
-    : [];
-
-  const successfulFrames = sampledFrames.filter((f) => f?.read_success);
-
-  const sampledTimestamps = successfulFrames
-    .map((f) => f?.timestamp_seconds)
-    .filter((value) => value !== null && value !== undefined);
-
-  const previewTimestamps = sampledTimestamps.slice(0, 12).join(", ");
-
-  const trackingQuality = pythonResult?.tracking_quality || {};
+function buildLeanCvSummary(run, pythonResult) {
   const identifiedBarrels = pythonResult?.identified_barrels || {};
-  const turns = pythonResult?.turns || {};
   const splits = pythonResult?.splits || {};
-  const barrelMetrics = pythonResult?.barrel_metrics || {};
-  const pythonInsights = Array.isArray(pythonResult?.insights)
-    ? pythonResult.insights
+  const insights = Array.isArray(pythonResult?.insights)
+    ? pythonResult.insights.slice(0, 4)
     : [];
 
-  const barrelSummaryLines = ["barrel1", "barrel2", "barrel3"].map((name) => {
+  const barrelLines = ["barrel1", "barrel2", "barrel3"].map((name) => {
     const barrel = identifiedBarrels?.[name];
-    if (!barrel) {
-      return `- ${name}: not confidently identified`;
-    }
-
-    return `- ${name}: center=(${barrel.center_x}, ${barrel.center_y}), detections=${barrel.detection_count}, avg_conf=${barrel.average_confidence}`;
+    if (!barrel) return `${name}: not confidently identified`;
+    return `${name}: center=(${barrel.center_x}, ${barrel.center_y}), detections=${barrel.detection_count}`;
   });
-
-  const turnSummaryLines = ["barrel1", "barrel2", "barrel3"].map((name) => {
-    const turn = turns?.[name];
-    if (!turn) {
-      return `- ${name}: no turn window confidently identified`;
-    }
-
-    return `- ${name}: start=${turn.start_frame}, apex=${turn.apex_frame}, end=${turn.end_frame}, min_distance_px=${turn.min_distance_px}`;
-  });
-
-  const metricSummaryLines = ["barrel1", "barrel2", "barrel3"].map((name) => {
-    const metric = barrelMetrics?.[name];
-    if (!metric) {
-      return `- ${name}: no barrel metrics available`;
-    }
-
-    return `- ${name}: entry_speed=${metric.entry_speed_px_per_sec ?? "n/a"}, exit_speed=${metric.exit_speed_px_per_sec ?? "n/a"}, path_length=${metric.path_length_px ?? "n/a"}, heading_change=${metric.heading_change_deg ?? "n/a"}`;
-  });
-
-  const splitSummary = [
-    `- start to barrel 1: ${splits?.start_to_barrel1_seconds ?? "n/a"}`,
-    `- barrel 1 to barrel 2: ${splits?.barrel1_to_barrel2_seconds ?? "n/a"}`,
-    `- barrel 2 to barrel 3: ${splits?.barrel2_to_barrel3_seconds ?? "n/a"}`,
-    `- barrel 3 to home: ${splits?.barrel3_to_home_seconds ?? "n/a"}`,
-  ].join("\n");
-
-  const trimmedPythonInsights = pythonInsights
-    .slice(0, 8)
-    .map((line) => `- ${line}`)
-    .join("\n");
 
   return `
 Computer vision summary:
-- Video duration (seconds): ${pythonResult?.duration_seconds ?? "unknown"}
+- Duration: ${pythonResult?.duration_seconds ?? "unknown"} seconds
 - FPS: ${pythonResult?.fps ?? "unknown"}
 - Resolution: ${pythonResult?.width ?? "unknown"} x ${pythonResult?.height ?? "unknown"}
-- Total sampled frames: ${sampledFrames.length}
-- Successfully read sampled frames: ${successfulFrames.length}
-- Frames with horse detected: ${pythonResult?.horse_detected_frames ?? "unknown"}
+- Horse detected frames: ${pythonResult?.horse_detected_frames ?? "unknown"}
 - Raw trajectory points: ${pythonResult?.raw_trajectory_point_count ?? 0}
 - Accepted trajectory points: ${pythonResult?.accepted_trajectory_point_count ?? 0}
 - Smoothed trajectory points: ${pythonResult?.smoothed_trajectory_point_count ?? 0}
-- Sampled frame timestamps (seconds): ${previewTimestamps || "none"}
 
-Tracking quality:
-- Read success rate: ${trackingQuality?.read_success_rate ?? "unknown"}
-- Horse detection rate: ${trackingQuality?.horse_detection_rate ?? "unknown"}
-- Accepted point rate: ${trackingQuality?.accepted_point_rate ?? "unknown"}
-- Rejected jump count: ${trackingQuality?.rejected_jump_count ?? "unknown"}
-
-Identified barrels:
-${barrelSummaryLines.join("\n")}
-
-Turn windows:
-${turnSummaryLines.join("\n")}
-
-Barrel metrics:
-${metricSummaryLines.join("\n")}
+Barrels:
+- ${barrelLines.join("\n- ")}
 
 Estimated split timing:
-${splitSummary}
+- start to barrel 1: ${splits?.start_to_barrel1_seconds ?? "n/a"}
+- barrel 1 to barrel 2: ${splits?.barrel1_to_barrel2_seconds ?? "n/a"}
+- barrel 2 to barrel 3: ${splits?.barrel2_to_barrel3_seconds ?? "n/a"}
+- barrel 3 to home: ${splits?.barrel3_to_home_seconds ?? "n/a"}
 
-Python-generated insights:
-${trimmedPythonInsights || "- none"}
+Key CV insights:
+${insights.length ? insights.map((item) => `- ${item}`).join("\n") : "- none"}
+
+Run metadata:
+- Horse: ${run?.horse || ""}
+- Time: ${run?.time || ""}
+- Show Name: ${run?.showName || ""}
+- Location: ${run?.location || ""}
+- Arena Condition: ${run?.arenaCondition || ""}
+- Placing: ${run?.placing || ""}
+- Earnings: ${run?.earnings || ""}
+- Notes: ${run?.notes || ""}
+- Rider Feedback: ${run?.riderFeedback || ""}
 
 Important limitations:
-- All geometry is image-space geometry, not true calibrated arena-space measurement.
-- Estimated split timing and speed values are derived from sampled video frames and should be treated as coaching estimates.
-- Barrel identity is inferred from clustered detections and may be less reliable when detections are sparse, distant, or partially occluded.
-- Use the frames and overlays to confirm posture, pocket, line, and exit quality before making strong claims.
-
-Run data:
-Horse: ${run?.horse || ""}
-Time: ${run?.time || ""}
-Show Name: ${run?.showName || ""}
-Location: ${run?.location || ""}
-Arena Condition: ${run?.arenaCondition || ""}
-Placing: ${run?.placing || ""}
-Earnings: ${run?.earnings || ""}
-Notes: ${run?.notes || ""}
-Rider Feedback: ${run?.riderFeedback || ""}
+- This is image-space analysis, not true calibrated arena measurement.
+- Be conservative. If something is unclear from the images, say so.
   `.trim();
 }
 
-function buildVisionPrompt(run, pythonResult) {
-  const cvSummary = buildCvSummary(run, pythonResult);
+function buildLeanVisionPrompt(run, pythonResult) {
+  const cvSummary = buildLeanCvSummary(run, pythonResult);
 
   return `
-You are an experienced barrel racing coach analyzing a rider's run.
+You are an experienced barrel racing coach.
 
-Use the provided run metadata, computer vision summary, and video frame images to evaluate the run.
+Your job is to give a FAST, practical, believable coaching read on this run using:
+- run metadata
+- computer vision summary
+- a small set of representative frame images
 
-Evaluate these performance factors as carefully as the evidence supports:
-- Entry angle to each barrel
-- Pocket size entering each barrel
-- Horse shoulder control through each turn
-- Rider seat position and balance
-- Exit drive leaving each barrel
-- Line efficiency between barrels
-- Estimated time lost due to mistakes
-- Speed/pace quality from:
-  - start to barrel 1
-  - barrel 1 to barrel 2
-  - barrel 2 to barrel 3
-  - barrel 3 to home
+Focus only on the highest-value coaching points.
 
-Important rules:
-- Do not claim certainty beyond what the metadata, CV summary, and images support.
-- Use the Python barrel identities and turn windows as guidance, but do not blindly trust them if the frames visibly contradict them.
-- If something is unclear from the images, say so briefly in the relevant note or explanation.
-- Be specific and practical.
-- Treat all numeric scores as estimates from 1 to 10, where 10 is strongest.
-- For "bestBarrel" and "bestTurn", use only: "1st", "2nd", or "3rd".
-- For "focusNext", give one short coaching priority phrase.
-- For "estimatedTimeLost", give estimated values as strings like "0.08s".
-- Any mention of shoulder control or shoulder drop must refer to the horse, not the rider.
+Priorities:
+1. overall run quality
+2. strongest barrel
+3. strongest turn
+4. most important thing to fix next
+5. short speed/efficiency read
+6. any brief caution about uncertainty if the evidence is limited
+
+Rules:
+- Be honest and conservative.
+- Do not invent detail that is not visible or supported.
+- Keep the response practical and short.
+- "bestBarrel" and "bestTurn" must be only: "1st", "2nd", or "3rd".
+- "focusNext" must be a short coaching priority phrase.
+- "speedInsight" should be 1 short sentence.
+- "accuracyNotes" should be 1 short sentence about confidence/limitations.
 - Return ONLY valid JSON.
-- Do not use markdown.
-- Do not wrap the JSON in backticks.
+- No markdown.
+- No backticks.
 
 ${cvSummary}
 
 Return ONLY valid JSON in this exact format:
 
 {
-  "summary": "Overall run analysis",
-  "strengths": ["", "", ""],
-  "issues": ["", "", ""],
-  "workOns": ["", "", ""],
-  "drills": ["", "", ""],
+  "summary": "2-4 sentence practical coaching summary.",
   "bestBarrel": "1st",
-  "bestBarrelReason": "Short explanation of why this was the strongest barrel overall.",
   "bestTurn": "2nd",
-  "bestTurnReason": "Short explanation of why this was the strongest turn overall.",
   "focusNext": "Cleaner entry to 1st barrel",
-  "pathEfficiency": {
-    "score": 7,
-    "note": "Short explanation"
-  },
-  "barrelPocketScore": {
-    "barrel1": 6,
-    "barrel2": 8,
-    "barrel3": 7,
-    "note": "Short explanation"
-  },
-  "entryAngleScore": {
-    "barrel1": 6,
-    "barrel2": 7,
-    "barrel3": 8
-  },
-  "turnShapeScore": {
-    "barrel1": 6,
-    "barrel2": 7,
-    "barrel3": 8
-  },
-  "exitDriveScore": {
-    "barrel1": 6,
-    "barrel2": 7,
-    "barrel3": 9
-  },
-  "riderPositionScore": {
-    "score": 7,
-    "note": "Short explanation"
-  },
-  "lineEfficiencyScore": {
-    "score": 7,
-    "note": "Short explanation"
-  },
-  "speedScore": {
-    "startToBarrel1": 7,
-    "barrel1ToBarrel2": 6,
-    "barrel2ToBarrel3": 8,
-    "barrel3ToHome": 9,
-    "note": "Short explanation"
-  },
-  "estimatedTimeLost": {
-    "barrel1": "0.08s",
-    "barrel2": "0.03s",
-    "barrel3": "0.01s",
-    "totalEstimatedTimeLost": "0.12s"
-  }
+  "speedInsight": "The run carried decent speed between the 2nd and 3rd barrels but gave away momentum leaving the 1st.",
+  "accuracyNotes": "Barrel identity and turn detail are moderately confident but limited by image-space analysis."
 }
   `.trim();
 }
 
-function buildTextOnlyPrompt(run) {
+function buildLeanTextOnlyPrompt(run) {
   return `
 You are an experienced barrel racing coach.
 
-No video was provided for this run. Analyze only the run metadata below.
+No video was provided. Use only the metadata and rider notes.
 
-Important rules:
-- Be honest that no video was provided.
-- Use the rider feedback, notes, time, and arena condition to make practical coaching inferences.
-- If you cannot confidently score a field without video, still provide a reasonable estimate but keep the note cautious.
-- Treat all numeric scores as estimates from 1 to 10, where 10 is strongest.
-- For "bestBarrel" and "bestTurn", use only: "1st", "2nd", or "3rd".
-- For "focusNext", give one short coaching priority phrase.
-- For "estimatedTimeLost", give estimated values as strings like "0.08s".
-- Any mention of shoulder control or shoulder drop must refer to the horse, not the rider.
+Be practical and conservative.
+
+Rules:
+- Be honest that no video was available.
+- Keep the response short and useful.
+- "bestBarrel" and "bestTurn" must be only: "1st", "2nd", or "3rd".
+- "focusNext" must be a short coaching priority phrase.
+- "speedInsight" should be 1 short sentence.
+- "accuracyNotes" should be 1 short sentence about confidence/limitations.
 - Return ONLY valid JSON.
-- Do not use markdown.
-- Do not wrap the JSON in backticks.
+- No markdown.
+- No backticks.
+
+Run data:
+- Horse: ${run?.horse || ""}
+- Time: ${run?.time || ""}
+- Show Name: ${run?.showName || ""}
+- Location: ${run?.location || ""}
+- Arena Condition: ${run?.arenaCondition || ""}
+- Placing: ${run?.placing || ""}
+- Earnings: ${run?.earnings || ""}
+- Notes: ${run?.notes || ""}
+- Rider Feedback: ${run?.riderFeedback || ""}
 
 Return ONLY valid JSON in this exact format:
 
 {
-  "summary": "Overall run analysis",
-  "strengths": ["", "", ""],
-  "issues": ["", "", ""],
-  "workOns": ["", "", ""],
-  "drills": ["", "", ""],
+  "summary": "2-4 sentence practical coaching summary.",
   "bestBarrel": "1st",
-  "bestBarrelReason": "Short explanation of why this was the strongest barrel overall.",
   "bestTurn": "2nd",
-  "bestTurnReason": "Short explanation of why this was the strongest turn overall.",
   "focusNext": "Cleaner entry to 1st barrel",
-  "pathEfficiency": {
-    "score": 7,
-    "note": "Short explanation"
-  },
-  "barrelPocketScore": {
-    "barrel1": 6,
-    "barrel2": 8,
-    "barrel3": 7,
-    "note": "Short explanation"
-  },
-  "entryAngleScore": {
-    "barrel1": 6,
-    "barrel2": 7,
-    "barrel3": 8
-  },
-  "turnShapeScore": {
-    "barrel1": 6,
-    "barrel2": 7,
-    "barrel3": 8
-  },
-  "exitDriveScore": {
-    "barrel1": 6,
-    "barrel2": 7,
-    "barrel3": 9
-  },
-  "riderPositionScore": {
-    "score": 7,
-    "note": "Short explanation"
-  },
-  "lineEfficiencyScore": {
-    "score": 7,
-    "note": "Short explanation"
-  },
-  "speedScore": {
-    "startToBarrel1": 7,
-    "barrel1ToBarrel2": 6,
-    "barrel2ToBarrel3": 8,
-    "barrel3ToHome": 9,
-    "note": "Short explanation"
-  },
-  "estimatedTimeLost": {
-    "barrel1": "0.08s",
-    "barrel2": "0.03s",
-    "barrel3": "0.01s",
-    "totalEstimatedTimeLost": "0.12s"
-  }
+  "speedInsight": "Based on the notes, the run may have lost momentum through the first turn.",
+  "accuracyNotes": "Confidence is limited because no video was provided."
 }
-
-Run data:
-Horse: ${run?.horse || ""}
-Time: ${run?.time || ""}
-Show Name: ${run?.showName || ""}
-Location: ${run?.location || ""}
-Arena Condition: ${run?.arenaCondition || ""}
-Placing: ${run?.placing || ""}
-Earnings: ${run?.earnings || ""}
-Notes: ${run?.notes || ""}
-Rider Feedback: ${run?.riderFeedback || ""}
   `.trim();
 }
 
@@ -565,11 +399,6 @@ function sanitizePythonForClient(pythonResult) {
       barrel1_to_barrel2_seconds: null,
       barrel2_to_barrel3_seconds: null,
       barrel3_to_home_seconds: null,
-    },
-    barrel_metrics: pythonResult.barrel_metrics || {
-      barrel1: null,
-      barrel2: null,
-      barrel3: null,
     },
     insights: Array.isArray(pythonResult.insights) ? pythonResult.insights : [],
     sampled_frames: Array.isArray(pythonResult.sampled_frames)
@@ -759,7 +588,7 @@ function updateJob(jobId, updates) {
   return job;
 }
 
-function selectStrategicFramePaths(sampledFrames, maxFrames = 10) {
+function selectStrategicFramePaths(sampledFrames, maxFrames = 4) {
   const usable = (sampledFrames || [])
     .filter(
       (frame) =>
@@ -787,7 +616,7 @@ function buildImageInputs(framePaths) {
     return {
       type: "input_image",
       image_url: `data:image/jpeg;base64,${base64}`,
-      detail: "auto",
+      detail: "low",
     };
   });
 }
@@ -887,20 +716,20 @@ async function processVideoJob(jobId) {
     const pythonResult = await runPythonAnalysis(videoPath);
 
     updateJob(jobId, {
-      progress: 50,
+      progress: 55,
       stage: "Computer vision finished",
     });
 
     pythonGeneratedPaths = getPythonGeneratedPaths(pythonResult);
 
     updateJob(jobId, {
-      progress: 60,
-      stage: "Selecting strategic frames",
+      progress: 65,
+      stage: "Selecting key frames",
     });
 
     const framePaths = selectStrategicFramePaths(
       pythonResult.sampled_frames || [],
-      10
+      4
     );
 
     if (!framePaths.length) {
@@ -909,7 +738,7 @@ async function processVideoJob(jobId) {
 
     updateJob(jobId, {
       progress: 72,
-      stage: "Preparing frame images for AI",
+      stage: "Preparing images for AI",
     });
 
     const imageInputs = buildImageInputs(framePaths);
@@ -932,7 +761,7 @@ async function processVideoJob(jobId) {
           content: [
             {
               type: "input_text",
-              text: buildVisionPrompt(latestJob.run, pythonResult),
+              text: buildLeanVisionPrompt(latestJob.run, pythonResult),
             },
             ...imageInputs,
           ],
@@ -1018,7 +847,7 @@ async function processTextJob(jobId) {
           content: [
             {
               type: "input_text",
-              text: buildTextOnlyPrompt(latestJob.run),
+              text: buildLeanTextOnlyPrompt(latestJob.run),
             },
           ],
         },
