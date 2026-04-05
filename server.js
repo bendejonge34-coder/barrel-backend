@@ -69,7 +69,9 @@ const upload = multer({
   },
   fileFilter: (_req, file, cb) => {
     const mime = String(file.mimetype || "").toLowerCase();
-    const ext = String(path.extname(file.originalname || "") || "").toLowerCase();
+    const ext = String(
+      path.extname(file.originalname || "") || ""
+    ).toLowerCase();
 
     const allowedMimeTypes = [
       "video/mp4",
@@ -100,16 +102,16 @@ const upload = multer({
   },
 });
 
+// ─── JSON Utilities ───────────────────────────────────────────────────────────
+
 function safeParseJson(input, fallback = null) {
   try {
     if (typeof input === "object" && input !== null) {
       return input;
     }
-
     if (typeof input !== "string" || !input.trim()) {
       return fallback;
     }
-
     return JSON.parse(input);
   } catch {
     return fallback;
@@ -149,6 +151,18 @@ function previewText(text, max = 1000) {
   return String(text || "").slice(0, max);
 }
 
+function parseModelJson(outputText) {
+  const cleanedOutputText = String(outputText || "")
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  return JSON.parse(cleanedOutputText);
+}
+
+// ─── Cleanup Utilities ────────────────────────────────────────────────────────
+
 function safeCleanup(paths) {
   for (const targetPath of paths) {
     try {
@@ -163,7 +177,10 @@ function safeCleanup(paths) {
       const isInsideProject = normalizedPath.startsWith(normalizedCwd);
 
       if (!isInsideProject) {
-        console.warn("Skipping cleanup outside project directory:", normalizedPath);
+        console.warn(
+          "Skipping cleanup outside project directory:",
+          normalizedPath
+        );
         continue;
       }
 
@@ -177,22 +194,15 @@ function safeCleanup(paths) {
       ) {
         fs.unlinkSync(normalizedPath);
       } else {
-        console.warn("Skipping cleanup for unexpected file path:", normalizedPath);
+        console.warn(
+          "Skipping cleanup for unexpected file path:",
+          normalizedPath
+        );
       }
     } catch (cleanupError) {
       console.warn("Cleanup warning:", cleanupError.message);
     }
   }
-}
-
-function parseModelJson(outputText) {
-  const cleanedOutputText = String(outputText || "")
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/\s*```$/, "")
-    .trim();
-
-  return JSON.parse(cleanedOutputText);
 }
 
 function getPythonGeneratedPaths(pythonResult) {
@@ -215,6 +225,8 @@ function getPythonGeneratedPaths(pythonResult) {
 
   return [...new Set(paths)];
 }
+
+// ─── Prompt Builders ──────────────────────────────────────────────────────────
 
 function buildLeanCvSummary(run, pythonResult) {
   const identifiedBarrels = pythonResult?.identified_barrels || {};
@@ -281,14 +293,6 @@ Your job is to give a FAST, practical, believable coaching read on this run usin
 
 Focus only on the highest-value coaching points.
 
-Priorities:
-1. overall run quality
-2. strongest barrel
-3. strongest turn
-4. most important thing to fix next
-5. short speed/efficiency read
-6. any brief caution about uncertainty if the evidence is limited
-
 Rules:
 - Be honest and conservative.
 - Do not invent detail that is not visible or supported.
@@ -297,9 +301,12 @@ Rules:
 - "focusNext" must be a short coaching priority phrase.
 - "speedInsight" should be 1 short sentence.
 - "accuracyNotes" should be 1 short sentence about confidence/limitations.
-- Return ONLY valid JSON.
-- No markdown.
-- No backticks.
+- Each item in "strengths", "issues", "workOns", and "drills" must be a short plain string.
+- "strengths" should have 2-3 items of what looked good in the run.
+- "issues" should have 2-3 items of the most likely problems observed.
+- "workOns" should have 2-3 short actionable things to practice.
+- "drills" should have 2-3 specific drill suggestions.
+- Return ONLY valid JSON. No markdown. No backticks.
 
 ${cvSummary}
 
@@ -311,7 +318,23 @@ Return ONLY valid JSON in this exact format:
   "bestTurn": "2nd",
   "focusNext": "Cleaner entry to 1st barrel",
   "speedInsight": "The run carried decent speed between the 2nd and 3rd barrels but gave away momentum leaving the 1st.",
-  "accuracyNotes": "Barrel identity and turn detail are moderately confident but limited by image-space analysis."
+  "accuracyNotes": "Barrel identity and turn detail are moderately confident but limited by image-space analysis.",
+  "strengths": [
+    "Good rate into 2nd barrel",
+    "Strong exit drive after 3rd barrel"
+  ],
+  "issues": [
+    "Wide entry to 1st barrel",
+    "Lost momentum coming out of the turn"
+  ],
+  "workOns": [
+    "Tighten the approach line to 1st barrel",
+    "Maintain pace and forward drive through each turn"
+  ],
+  "drills": [
+    "Trot the pattern slowly focusing on entry angles at each barrel",
+    "Practice rate and release at 1st barrel using a cone marker"
+  ]
 }
   `.trim();
 }
@@ -331,9 +354,12 @@ Rules:
 - "focusNext" must be a short coaching priority phrase.
 - "speedInsight" should be 1 short sentence.
 - "accuracyNotes" should be 1 short sentence about confidence/limitations.
-- Return ONLY valid JSON.
-- No markdown.
-- No backticks.
+- Each item in "strengths", "issues", "workOns", and "drills" must be a short plain string.
+- "strengths" should have 2-3 items of what likely went well based on the notes.
+- "issues" should have 2-3 items of likely problems based on the notes.
+- "workOns" should have 2-3 short actionable things to practice.
+- "drills" should have 2-3 specific drill suggestions.
+- Return ONLY valid JSON. No markdown. No backticks.
 
 Run data:
 - Horse: ${run?.horse || ""}
@@ -354,10 +380,28 @@ Return ONLY valid JSON in this exact format:
   "bestTurn": "2nd",
   "focusNext": "Cleaner entry to 1st barrel",
   "speedInsight": "Based on the notes, the run may have lost momentum through the first turn.",
-  "accuracyNotes": "Confidence is limited because no video was provided."
+  "accuracyNotes": "Confidence is limited because no video was provided.",
+  "strengths": [
+    "Consistent pace reported through the middle of the run",
+    "Good placing suggests overall solid effort"
+  ],
+  "issues": [
+    "Rider notes suggest issues at the first barrel",
+    "Momentum loss likely on one or more turns"
+  ],
+  "workOns": [
+    "Focus on entry angles at the first barrel",
+    "Work on maintaining forward drive through turns"
+  ],
+  "drills": [
+    "Trot the pattern to reinforce correct entry lines",
+    "Practice the first barrel approach at speed with a ground pole guide"
+  ]
 }
   `.trim();
 }
+
+// ─── Python Result Sanitizer ──────────────────────────────────────────────────
 
 function sanitizePythonForClient(pythonResult) {
   if (!pythonResult || typeof pythonResult !== "object") {
@@ -400,7 +444,12 @@ function sanitizePythonForClient(pythonResult) {
       barrel2_to_barrel3_seconds: null,
       barrel3_to_home_seconds: null,
     },
+    pattern_direction: pythonResult.pattern_direction || null,
+    normalized_actual_template_path:
+      pythonResult.normalized_actual_template_path || [],
+    ideal_template_path: pythonResult.ideal_template_path || [],
     insights: Array.isArray(pythonResult.insights) ? pythonResult.insights : [],
+    highlights: pythonResult.highlights || null,
     sampled_frames: Array.isArray(pythonResult.sampled_frames)
       ? pythonResult.sampled_frames.map((frame) => ({
           percent: frame?.percent ?? null,
@@ -429,10 +478,10 @@ function sanitizePythonForClient(pythonResult) {
   };
 }
 
+// ─── Job Store ────────────────────────────────────────────────────────────────
+
 function serializeJobsForDisk() {
-  return Array.from(jobs.values()).map((job) => ({
-    ...job,
-  }));
+  return Array.from(jobs.values()).map((job) => ({ ...job }));
 }
 
 function persistJobsToDisk() {
@@ -516,7 +565,10 @@ function restoreJobsFromDisk() {
 
       const restoredJob = { ...job };
 
-      if (restoredJob.status === "queued" || restoredJob.status === "running") {
+      if (
+        restoredJob.status === "queued" ||
+        restoredJob.status === "running"
+      ) {
         restoredJob.status = "failed";
         restoredJob.stage = "Failed";
         restoredJob.completedAt = new Date().toISOString();
@@ -559,7 +611,14 @@ function createJob({ kind, run, videoPath = null }) {
   persistJobsToDisk();
 
   console.log("[JOB CREATED]", jobId, "kind:", kind);
-  console.log("[JOB STORED]", jobId, "exists:", jobs.has(jobId), "jobCount:", jobs.size);
+  console.log(
+    "[JOB STORED]",
+    jobId,
+    "exists:",
+    jobs.has(jobId),
+    "jobCount:",
+    jobs.size
+  );
 
   return job;
 }
@@ -588,11 +647,14 @@ function updateJob(jobId, updates) {
   return job;
 }
 
+// ─── Frame Selection ──────────────────────────────────────────────────────────
+
 function selectStrategicFramePaths(sampledFrames, maxFrames = 4) {
   const usable = (sampledFrames || [])
     .filter(
       (frame) =>
-        frame?.read_success && (frame?.overlay_image_path || frame?.image_path)
+        frame?.read_success &&
+        (frame?.overlay_image_path || frame?.image_path)
     )
     .map((frame) => frame.overlay_image_path || frame.image_path)
     .filter(Boolean);
@@ -614,12 +676,16 @@ function buildImageInputs(framePaths) {
   return framePaths.map((framePath) => {
     const base64 = fs.readFileSync(framePath).toString("base64");
     return {
-      type: "input_image",
-      image_url: `data:image/jpeg;base64,${base64}`,
-      detail: "low",
+      type: "image_url",
+      image_url: {
+        url: `data:image/jpeg;base64,${base64}`,
+        detail: "low",
+      },
     };
   });
 }
+
+// ─── Python Runner ────────────────────────────────────────────────────────────
 
 async function runPythonAnalysis(videoPath) {
   console.log("Running Python analysis...");
@@ -690,6 +756,8 @@ async function runPythonAnalysis(videoPath) {
   }
 }
 
+// ─── Job Processors ───────────────────────────────────────────────────────────
+
 async function processVideoJob(jobId) {
   const initialJob = jobs.get(jobId);
   if (!initialJob) {
@@ -753,14 +821,16 @@ async function processVideoJob(jobId) {
       throw new Error("Job disappeared before OpenAI analysis started.");
     }
 
-    const response = await openai.responses.create({
+    // Call OpenAI chat completions with vision
+    const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      input: [
+      max_tokens: 1000,
+      messages: [
         {
           role: "user",
           content: [
             {
-              type: "input_text",
+              type: "text",
               text: buildLeanVisionPrompt(latestJob.run, pythonResult),
             },
             ...imageInputs,
@@ -774,7 +844,7 @@ async function processVideoJob(jobId) {
       stage: "Finalizing analysis",
     });
 
-    const outputText = response.output_text;
+    const outputText = response.choices?.[0]?.message?.content || "";
 
     let parsedAnalysis;
     try {
@@ -787,6 +857,28 @@ async function processVideoJob(jobId) {
       throw new Error("OpenAI returned invalid JSON.");
     }
 
+    // Ensure all required fields exist with safe fallbacks
+    const safeAnalysis = {
+      summary: parsedAnalysis.summary || "",
+      bestBarrel: parsedAnalysis.bestBarrel || null,
+      bestTurn: parsedAnalysis.bestTurn || null,
+      focusNext: parsedAnalysis.focusNext || null,
+      speedInsight: parsedAnalysis.speedInsight || null,
+      accuracyNotes: parsedAnalysis.accuracyNotes || null,
+      strengths: Array.isArray(parsedAnalysis.strengths)
+        ? parsedAnalysis.strengths
+        : [],
+      issues: Array.isArray(parsedAnalysis.issues)
+        ? parsedAnalysis.issues
+        : [],
+      workOns: Array.isArray(parsedAnalysis.workOns)
+        ? parsedAnalysis.workOns
+        : [],
+      drills: Array.isArray(parsedAnalysis.drills)
+        ? parsedAnalysis.drills
+        : [],
+    };
+
     updateJob(jobId, {
       status: "completed",
       progress: 100,
@@ -794,7 +886,7 @@ async function processVideoJob(jobId) {
       completedAt: new Date().toISOString(),
       result: {
         success: true,
-        analysis: parsedAnalysis,
+        analysis: safeAnalysis,
         python: sanitizePythonForClient(pythonResult),
         frameCount: framePaths.length,
       },
@@ -839,17 +931,14 @@ async function processTextJob(jobId) {
       throw new Error("Job disappeared before text analysis started.");
     }
 
-    const response = await openai.responses.create({
+    // Call OpenAI chat completions (text only)
+    const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      input: [
+      max_tokens: 1000,
+      messages: [
         {
           role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: buildLeanTextOnlyPrompt(latestJob.run),
-            },
-          ],
+          content: buildLeanTextOnlyPrompt(latestJob.run),
         },
       ],
     });
@@ -859,7 +948,7 @@ async function processTextJob(jobId) {
       stage: "Finalizing analysis",
     });
 
-    const outputText = response.output_text;
+    const outputText = response.choices?.[0]?.message?.content || "";
 
     let parsedAnalysis;
     try {
@@ -872,6 +961,28 @@ async function processTextJob(jobId) {
       throw new Error("OpenAI returned invalid JSON.");
     }
 
+    // Ensure all required fields exist with safe fallbacks
+    const safeAnalysis = {
+      summary: parsedAnalysis.summary || "",
+      bestBarrel: parsedAnalysis.bestBarrel || null,
+      bestTurn: parsedAnalysis.bestTurn || null,
+      focusNext: parsedAnalysis.focusNext || null,
+      speedInsight: parsedAnalysis.speedInsight || null,
+      accuracyNotes: parsedAnalysis.accuracyNotes || null,
+      strengths: Array.isArray(parsedAnalysis.strengths)
+        ? parsedAnalysis.strengths
+        : [],
+      issues: Array.isArray(parsedAnalysis.issues)
+        ? parsedAnalysis.issues
+        : [],
+      workOns: Array.isArray(parsedAnalysis.workOns)
+        ? parsedAnalysis.workOns
+        : [],
+      drills: Array.isArray(parsedAnalysis.drills)
+        ? parsedAnalysis.drills
+        : [],
+    };
+
     updateJob(jobId, {
       status: "completed",
       progress: 100,
@@ -879,7 +990,7 @@ async function processTextJob(jobId) {
       completedAt: new Date().toISOString(),
       result: {
         success: true,
-        analysis: parsedAnalysis,
+        analysis: safeAnalysis,
         python: null,
         frameCount: 0,
       },
@@ -910,7 +1021,11 @@ function startJobProcessing(job) {
   }
 }
 
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+
 restoreJobsFromDisk();
+
+// ─── Routes ───────────────────────────────────────────────────────────────────
 
 app.get("/", (_req, res) => {
   res.json({
@@ -947,69 +1062,55 @@ app.get("/debug/jobs", (_req, res) => {
   });
 });
 
-app.get("/test-python", async (_req, res) => {
-  try {
-    const testVideoPath = "test-video.mp4";
-    const pythonResult = await runPythonAnalysis(testVideoPath);
+app.post(
+  "/analyze-run-video/start",
+  upload.single("video"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          error: "No video file was uploaded.",
+        });
+      }
 
-    return res.json({
-      ok: true,
-      python: pythonResult,
-    });
-  } catch (error) {
-    console.error("Python execution error:", error);
-    return res.status(500).json({
-      ok: false,
-      error: error.message,
-    });
-  }
-});
+      const runDataRaw = req.body?.runData ?? req.body?.run ?? "{}";
+      const run = safeParseJson(runDataRaw);
 
-app.post("/analyze-run-video/start", upload.single("video"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({
-        error: "No video file was uploaded.",
+      if (!run || typeof run !== "object") {
+        safeCleanup([req.file.path]);
+        return res.status(400).json({
+          error: "Run data was missing or invalid JSON.",
+        });
+      }
+
+      const job = createJob({
+        kind: "video",
+        run,
+        videoPath: req.file.path,
+      });
+
+      updateJob(job.id, {
+        progress: 5,
+        stage: "Upload received",
+      });
+
+      startJobProcessing(job);
+
+      console.log("[JOB START RESPONSE]", { jobId: job.id });
+
+      return res.json({
+        ok: true,
+        jobId: job.id,
+      });
+    } catch (error) {
+      console.error("START VIDEO JOB ERROR:", error);
+      return res.status(500).json({
+        error: "Could not start video analysis.",
+        details: error.message,
       });
     }
-
-    const runDataRaw = req.body?.runData ?? req.body?.run ?? "{}";
-    const run = safeParseJson(runDataRaw);
-
-    if (!run || typeof run !== "object") {
-      safeCleanup([req.file.path]);
-      return res.status(400).json({
-        error: "Run data was missing or invalid JSON.",
-      });
-    }
-
-    const job = createJob({
-      kind: "video",
-      run,
-      videoPath: req.file.path,
-    });
-
-    updateJob(job.id, {
-      progress: 5,
-      stage: "Upload received",
-    });
-
-    startJobProcessing(job);
-
-    console.log("[JOB START RESPONSE]", { jobId: job.id });
-
-    return res.json({
-      ok: true,
-      jobId: job.id,
-    });
-  } catch (error) {
-    console.error("START VIDEO JOB ERROR:", error);
-    return res.status(500).json({
-      error: "Could not start video analysis.",
-      details: error.message,
-    });
   }
-});
+);
 
 app.post("/analyze-run/start", async (req, res) => {
   try {
@@ -1079,6 +1180,8 @@ app.get("/analysis-status/:jobId", (req, res) => {
   });
 });
 
+// ─── Error Handler ────────────────────────────────────────────────────────────
+
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === "LIMIT_FILE_SIZE") {
@@ -1086,7 +1189,6 @@ app.use((error, _req, res, _next) => {
         error: "Uploaded video is too large. Max size is 250 MB.",
       });
     }
-
     return res.status(400).json({
       error: error.message || "Upload failed.",
     });
@@ -1102,6 +1204,8 @@ app.use((error, _req, res, _next) => {
     error: "Unknown server error.",
   });
 });
+
+// ─── Start Server ─────────────────────────────────────────────────────────────
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`AI Coaching Server running on port ${PORT}`);
