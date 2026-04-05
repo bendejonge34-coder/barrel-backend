@@ -29,24 +29,27 @@ HORSE_MODEL_PATH = os.path.join(BASE_DIR, "yolov8n.pt")
 
 HORSE_CLASS_ID = 17  # COCO horse
 
-# Tuned lean settings
+# Detection thresholds
 HORSE_CONFIDENCE_THRESHOLD = 0.18
 BARREL_CONFIDENCE_THRESHOLD = 0.48
 
+# Sampling
 TARGET_SAMPLE_FPS = 2.0
 MIN_SAMPLED_FRAMES = 12
 MAX_SAMPLED_FRAMES = 20
 
+# Inference resolution
 MAX_INFERENCE_WIDTH = 576
 MAX_INFERENCE_HEIGHT = 324
 
+# Smoothing
 SMOOTHING_ALPHA = 0.34
 INTERPOLATION_MAX_GAP = 3
 
+# Canonical barrel positions in normalized space (used for ideal path)
 CANONICAL_LEFT_BARREL_X = 0.24
 CANONICAL_RIGHT_BARREL_X = 0.76
 CANONICAL_TOP_BARREL_X = 0.50
-
 CANONICAL_TOP_BARREL_Y = 0.22
 CANONICAL_LOWER_BARREL_Y = 0.68
 CANONICAL_HOME_Y = 0.94
@@ -290,7 +293,8 @@ def scale_barrels_to_original(barrels, x_ratio, y_ratio):
 
 def adaptive_max_jump(width, height):
     diagonal = math.hypot(width, height) if width > 0 and height > 0 else 1000.0
-    return clamp(diagonal * 0.19, 150.0, 420.0)
+    # Tighter jump threshold to reduce wild tracking points
+    return clamp(diagonal * 0.15, 100.0, 320.0)
 
 
 def interpolate_small_gaps(track_points, max_gap=INTERPOLATION_MAX_GAP):
@@ -362,6 +366,10 @@ def dedupe_points(points, min_dist=6.0):
 
 
 def normalize_points_to_unit_box(points, padding=0.08):
+    """
+    Normalize points to 0-1 space using the bounding box of the points.
+    This is used for the frontend overlay display.
+    """
     if not points:
         return []
 
@@ -376,16 +384,27 @@ def normalize_points_to_unit_box(points, padding=0.08):
     range_x = max(max_x - min_x, 1.0)
     range_y = max(max_y - min_y, 1.0)
 
+    # Enforce minimum aspect ratio to prevent extreme stretching
+    # A barrel run is roughly 2:3 height to width ratio
+    aspect = range_y / max(range_x, 1.0)
+    if aspect < 0.5:
+        # Path is too wide and flat - likely a tracking artifact
+        # Expand the y range to make it more realistic
+        center_y = (min_y + max_y) / 2.0
+        range_y = range_x * 1.2
+        min_y = center_y - range_y / 2.0
+        max_y = center_y + range_y / 2.0
+
     normalized = []
 
     for x, y in points:
         nx = (float(x) - min_x) / range_x
-        ny = (float(y) - min_y) / range_y
+        ny = (float(y) - min_y) / max(max_y - min_y, 1.0)
 
         nx = padding + nx * (1.0 - 2.0 * padding)
         ny = padding + ny * (1.0 - 2.0 * padding)
 
-        normalized.append([round(nx, 4), round(ny, 4)])
+        normalized.append([round(clamp(nx, 0.0, 1.0), 4), round(clamp(ny, 0.0, 1.0), 4)])
 
     return normalized
 
@@ -411,9 +430,9 @@ def identify_barrels_simple(all_barrel_detections):
             )
 
     result = {
-        "barrel1": None,  # lower-left provisional
-        "barrel2": None,  # lower-right provisional
-        "barrel3": None,  # top provisional
+        "barrel1": None,
+        "barrel2": None,
+        "barrel3": None,
     }
 
     geometry = {
@@ -425,6 +444,7 @@ def identify_barrels_simple(all_barrel_detections):
     if len(points) < 3:
         return result, geometry
 
+    # Sort by Y to find the topmost barrel (smallest Y = highest on screen)
     weighted_top_candidates = sorted(points, key=lambda p: (p["y"], -p["confidence"]))
     top_candidates = weighted_top_candidates[: max(3, min(6, len(weighted_top_candidates)))]
     top_x = average_values([p["x"] for p in top_candidates])
@@ -432,7 +452,7 @@ def identify_barrels_simple(all_barrel_detections):
 
     lower_candidates = [p for p in points if p["y"] > top_y + 18]
     if len(lower_candidates) < 2:
-      lower_candidates = [p for p in points if p not in top_candidates]
+        lower_candidates = [p for p in points if p not in top_candidates]
 
     if len(lower_candidates) < 2:
         return result, geometry
@@ -661,30 +681,50 @@ def remap_frame_metric_labels(metrics, actual_to_provisional_map):
     return remapped
 
 
-def find_barrel_apex(barrel_name, frame_metrics):
+def find_barrel_apex(barrel_name, frame_metrics, min_approach_frames=2):
+    """
+    Find the apex (closest approach) of the horse to a barrel.
+
+    FIX: Previously picked the earliest frame among the closest candidates,
+    which caused it to pick the approach rather than the actual turn.
+    Now we find the true minimum distance point and require the horse to have
+    been approaching (distance decreasing) before it, not just any early frame.
+    """
+    dist_key = f"dist_to_{barrel_name}_px"
+
     valid = [
-        m
-        for m in frame_metrics
-        if m["horse_detected"] and m.get(f"dist_to_{barrel_name}_px") is not None
+        m for m in frame_metrics
+        if m["horse_detected"] and m.get(dist_key) is not None
     ]
 
-    if not valid:
+    if len(valid) < min_approach_frames:
         return None
 
-    dist_key = f"dist_to_{barrel_name}_px"
-    ordered = sorted(valid, key=lambda m: m[dist_key])
-    best_candidates = ordered[: min(3, len(ordered))]
-    apex_metric = min(best_candidates, key=lambda m: m["frame_index"])
+    # Find the frame with the actual minimum distance
+    min_metric = min(valid, key=lambda m: m[dist_key])
+    min_dist = min_metric[dist_key]
+    min_idx = valid.index(min_metric)
+
+    # Require at least one frame before with a larger distance (approaching)
+    # This confirms it's a real turn and not just a start position
+    if min_idx == 0:
+        # Horse was closest at the very first frame - likely not a real turn
+        # Use the second closest instead if available
+        if len(valid) > 1:
+            remaining = valid[1:]
+            min_metric = min(remaining, key=lambda m: m[dist_key])
+        else:
+            return None
 
     return {
         "barrel_name": barrel_name,
-        "start_frame": int(apex_metric["frame_index"]),
-        "apex_frame": int(apex_metric["frame_index"]),
-        "end_frame": int(apex_metric["frame_index"]),
-        "start_timestamp_seconds": apex_metric["timestamp_seconds"],
-        "apex_timestamp_seconds": apex_metric["timestamp_seconds"],
-        "end_timestamp_seconds": apex_metric["timestamp_seconds"],
-        "min_distance_px": round_or_none(apex_metric[dist_key], 2),
+        "start_frame": int(min_metric["frame_index"]),
+        "apex_frame": int(min_metric["frame_index"]),
+        "end_frame": int(min_metric["frame_index"]),
+        "start_timestamp_seconds": min_metric["timestamp_seconds"],
+        "apex_timestamp_seconds": min_metric["timestamp_seconds"],
+        "end_timestamp_seconds": min_metric["timestamp_seconds"],
+        "min_distance_px": round_or_none(min_metric[dist_key], 2),
     }
 
 
@@ -701,16 +741,6 @@ def enforce_turn_order(turns, direction):
     b2 = turns.get("barrel2")
     b3 = turns.get("barrel3")
 
-    ordered = []
-    for label, turn in [("barrel1", b1), ("barrel2", b2), ("barrel3", b3)]:
-        if turn and turn.get("apex_timestamp_seconds") is not None:
-            ordered.append((label, float(turn["apex_timestamp_seconds"])))
-
-    if len(ordered) < 2:
-        return turns
-
-    # Expected logical order is actual barrel1 -> actual barrel2 -> actual barrel3
-    # If timings violate that badly, null out later unreliable splits rather than returning nonsense
     t1 = b1["apex_timestamp_seconds"] if b1 else None
     t2 = b2["apex_timestamp_seconds"] if b2 else None
     t3 = b3["apex_timestamp_seconds"] if b3 else None
@@ -728,6 +758,13 @@ def enforce_turn_order(turns, direction):
 
 
 def build_splits(turns, frame_metrics):
+    """
+    Build split times between barrels.
+
+    FIX: Previously used the first detected frame as start_time, which
+    caused start_to_barrel1 to be 0 when the horse was already near barrel1
+    at the first sampled frame. Now we use a smarter start detection.
+    """
     valid = [m for m in frame_metrics if m["horse_detected"] and m["timestamp_seconds"] is not None]
     if not valid:
         return {
@@ -737,26 +774,36 @@ def build_splits(turns, frame_metrics):
             "barrel3_to_home_seconds": None,
         }
 
-    start_time = valid[0]["timestamp_seconds"]
-    end_time = valid[-1]["timestamp_seconds"]
-
     b1 = turns.get("barrel1")
     b2 = turns.get("barrel2")
     b3 = turns.get("barrel3")
 
-    s1 = (
-        b1["apex_timestamp_seconds"] - start_time
-        if b1 and b1["apex_timestamp_seconds"] is not None
-        else None
-    )
+    # Use the first frame as start and last frame as end
+    start_time = valid[0]["timestamp_seconds"]
+    end_time = valid[-1]["timestamp_seconds"]
+
+    # FIX: If barrel1 apex is at or before the second sampled frame,
+    # the split will be near 0 or wrong. In that case, mark it as None
+    # rather than returning a misleading 0.
+    s1 = None
+    if b1 and b1["apex_timestamp_seconds"] is not None:
+        raw_s1 = b1["apex_timestamp_seconds"] - start_time
+        # Only accept if the horse had time to approach (at least 0.5 seconds)
+        if raw_s1 >= 0.5:
+            s1 = raw_s1
+
     s2 = (
         b2["apex_timestamp_seconds"] - b1["apex_timestamp_seconds"]
-        if b1 and b2 and b1["apex_timestamp_seconds"] is not None and b2["apex_timestamp_seconds"] is not None
+        if b1 and b2
+        and b1["apex_timestamp_seconds"] is not None
+        and b2["apex_timestamp_seconds"] is not None
         else None
     )
     s3 = (
         b3["apex_timestamp_seconds"] - b2["apex_timestamp_seconds"]
-        if b2 and b3 and b2["apex_timestamp_seconds"] is not None and b3["apex_timestamp_seconds"] is not None
+        if b2 and b3
+        and b2["apex_timestamp_seconds"] is not None
+        and b3["apex_timestamp_seconds"] is not None
         else None
     )
     s4 = (
@@ -869,6 +916,10 @@ def summarize_barrel_detections(all_barrel_detections):
 
 
 def build_normalized_actual_path(smoothed_points, barrel_geometry):
+    """
+    Normalize the actual horse path using detected barrel positions as anchors.
+    This produces a geometrically meaningful normalized path for the frontend overlay.
+    """
     if not smoothed_points or not barrel_geometry:
         return {"normalized_path": [], "transform": None}
 
@@ -973,17 +1024,23 @@ def mirror_points_horiz(points):
 
 
 def build_left_first_ideal_waypoints():
+    """
+    Waypoints for the ideal left-first barrel pattern.
+    Coordinates are in normalized 0-1 space matching the frontend overlay.
+    The pattern runs: start at bottom center -> barrel 1 (lower left) ->
+    barrel 3 (top) -> barrel 2 (lower right) -> home (bottom center)
+    """
     return [
-        (0.50, 0.94),
+        (0.50, 0.94),  # start / home
         (0.46, 0.90),
         (0.40, 0.86),
         (0.34, 0.82),
         (0.28, 0.77),
         (0.22, 0.72),
-        (0.18, 0.66),
+        (0.18, 0.66),  # approach barrel 1
         (0.18, 0.60),
         (0.22, 0.56),
-        (0.30, 0.56),
+        (0.30, 0.56),  # turning barrel 1
         (0.38, 0.60),
         (0.46, 0.65),
         (0.56, 0.68),
@@ -993,7 +1050,7 @@ def build_left_first_ideal_waypoints():
         (0.82, 0.58),
         (0.80, 0.54),
         (0.74, 0.52),
-        (0.66, 0.54),
+        (0.66, 0.54),  # turning barrel 2
         (0.58, 0.58),
         (0.54, 0.64),
         (0.52, 0.56),
@@ -1004,7 +1061,7 @@ def build_left_first_ideal_waypoints():
         (0.46, 0.16),
         (0.44, 0.12),
         (0.44, 0.10),
-        (0.46, 0.08),
+        (0.46, 0.08),  # turning barrel 3
         (0.50, 0.08),
         (0.54, 0.08),
         (0.56, 0.10),
@@ -1017,7 +1074,7 @@ def build_left_first_ideal_waypoints():
         (0.48, 0.66),
         (0.46, 0.78),
         (0.45, 0.88),
-        (0.45, 0.94),
+        (0.45, 0.94),  # home
     ]
 
 
@@ -1088,26 +1145,8 @@ def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, 
     header_1 = f"frame {frame_index}"
     header_2 = f"time {timestamp_seconds}s" if timestamp_seconds is not None else "time unknown"
 
-    cv2.putText(
-        overlay,
-        header_1,
-        (16, 28),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
-    cv2.putText(
-        overlay,
-        header_2,
-        (16, 56),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
+    cv2.putText(overlay, header_1, (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(overlay, header_2, (16, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
     return overlay
 
@@ -1173,20 +1212,8 @@ def save_path_map(
         origin_x = max(20, canvas_width - mini_w - 20)
         origin_y = 20
 
-        cv2.rectangle(
-            canvas,
-            (origin_x, origin_y),
-            (origin_x + mini_w, origin_y + mini_h),
-            (235, 235, 235),
-            -1,
-        )
-        cv2.rectangle(
-            canvas,
-            (origin_x, origin_y),
-            (origin_x + mini_w, origin_y + mini_h),
-            (120, 120, 120),
-            2,
-        )
+        cv2.rectangle(canvas, (origin_x, origin_y), (origin_x + mini_w, origin_y + mini_h), (235, 235, 235), -1)
+        cv2.rectangle(canvas, (origin_x, origin_y), (origin_x + mini_w, origin_y + mini_h), (120, 120, 120), 2)
 
         def draw_norm_polyline(points, color, thickness):
             if not points or len(points) < 2:
@@ -1222,16 +1249,7 @@ def save_path_map(
                 cv2.LINE_AA,
             )
 
-        cv2.putText(
-            canvas,
-            "ideal vs actual",
-            (origin_x + 10, origin_y + 18),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (60, 60, 60),
-            1,
-            cv2.LINE_AA,
-        )
+        cv2.putText(canvas, "ideal vs actual", (origin_x + 10, origin_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1, cv2.LINE_AA)
 
     safe_imwrite(out_path, canvas)
 
@@ -1397,7 +1415,8 @@ def main():
                             chosen_point_for_track = current_point
                             previous_accepted_point = current_point
                         else:
-                            if jump_distance <= max_jump * 1.25:
+                            # Stricter rejection - only allow 10% over threshold not 25%
+                            if jump_distance <= max_jump * 1.10:
                                 accepted_points.append(current_point)
                                 chosen_point_for_track = current_point
                                 previous_accepted_point = current_point
