@@ -33,13 +33,10 @@ HORSE_CLASS_ID = 17  # COCO horse
 HORSE_CONFIDENCE_THRESHOLD = 0.18
 BARREL_CONFIDENCE_THRESHOLD = 0.48
 
-# Base sampling
+# Sampling
 TARGET_SAMPLE_FPS = 2.0
 MIN_SAMPLED_FRAMES = 12
 MAX_SAMPLED_FRAMES = 20
-
-# Extra frames to sample near each barrel turn
-BARREL_ZONE_EXTRA_FRAMES = 6
 
 # Inference resolution
 MAX_INFERENCE_WIDTH = 576
@@ -57,9 +54,8 @@ CANONICAL_TOP_BARREL_Y = 0.22
 CANONICAL_LOWER_BARREL_Y = 0.68
 CANONICAL_HOME_Y = 0.94
 
-# Radius around a barrel (in pixels) considered "near" that barrel
-# Used to identify which tracking points are turn data vs transit data
-BARREL_NEAR_RADIUS_FRACTION = 0.25  # fraction of arena diagonal
+# How close (fraction of arena diagonal) the horse must be to count as a turn detection
+BARREL_NEAR_RADIUS_FRACTION = 0.28
 
 
 def log_err(*args):
@@ -156,43 +152,11 @@ def build_sample_frame_indices(frame_count, fps):
         indices.append(frame_count - 1)
     if len(indices) < MIN_SAMPLED_FRAMES and frame_count > MIN_SAMPLED_FRAMES:
         desired = min(MIN_SAMPLED_FRAMES, frame_count)
-        indices = sorted(
-            set(int(round(i * (frame_count - 1) / max(desired - 1, 1))) for i in range(desired))
-        )
+        indices = sorted(set(int(round(i * (frame_count - 1) / max(desired - 1, 1))) for i in range(desired)))
     if len(indices) > MAX_SAMPLED_FRAMES:
         desired = MAX_SAMPLED_FRAMES
-        indices = sorted(
-            set(int(round(i * (frame_count - 1) / max(desired - 1, 1))) for i in range(desired))
-        )
+        indices = sorted(set(int(round(i * (frame_count - 1) / max(desired - 1, 1))) for i in range(desired)))
     return sorted(set(indices))
-
-
-def build_barrel_zone_extra_frames(base_indices, frame_count, fps, turns):
-    """
-    Add extra sample frames in the time window around each detected barrel turn.
-    This gives us more tracking points at the turns where accuracy matters most.
-    """
-    extra = set()
-
-    for barrel_name, turn_info in turns.items():
-        if turn_info is None:
-            continue
-        apex_frame = turn_info.get("apex_frame")
-        if apex_frame is None:
-            continue
-
-        # Sample densely around the apex — within ~1.5 seconds either side
-        window = max(3, int(fps * 1.5))
-        start_f = max(0, apex_frame - window)
-        end_f = min(frame_count - 1, apex_frame + window)
-
-        # Add evenly spaced frames in that window
-        for i in range(BARREL_ZONE_EXTRA_FRAMES):
-            f = int(start_f + (end_f - start_f) * i / max(BARREL_ZONE_EXTRA_FRAMES - 1, 1))
-            extra.add(f)
-
-    all_indices = sorted(set(base_indices) | extra)
-    return all_indices
 
 
 def build_horse_candidates(result, x_ratio=1.0, y_ratio=1.0):
@@ -330,70 +294,11 @@ def dedupe_points(points, min_dist=6.0):
     return deduped
 
 
-def normalize_points_to_unit_box(points, padding=0.08):
-    if not points:
-        return []
-    xs = [float(p[0]) for p in points]
-    ys = [float(p[1]) for p in points]
-    min_x = min(xs); max_x = max(xs)
-    min_y = min(ys); max_y = max(ys)
-    range_x = max(max_x - min_x, 1.0)
-    range_y = max(max_y - min_y, 1.0)
-
-    # Enforce minimum aspect ratio to prevent extreme stretching
-    aspect = range_y / max(range_x, 1.0)
-    if aspect < 0.5:
-        center_y = (min_y + max_y) / 2.0
-        range_y = range_x * 1.2
-        min_y = center_y - range_y / 2.0
-        max_y = center_y + range_y / 2.0
-
-    normalized = []
-    for x, y in points:
-        nx = (float(x) - min_x) / range_x
-        ny = (float(y) - min_y) / max(max_y - min_y, 1.0)
-        nx = padding + nx * (1.0 - 2.0 * padding)
-        ny = padding + ny * (1.0 - 2.0 * padding)
-        normalized.append([round(clamp(nx, 0.0, 1.0), 4), round(clamp(ny, 0.0, 1.0), 4)])
-    return normalized
-
-
 def average_values(values):
     values = [float(v) for v in values if v is not None]
     if not values:
         return None
     return sum(values) / len(values)
-
-
-def lerp(a, b, t):
-    return float(a) + t * (float(b) - float(a))
-
-
-def lerp_point(p1, p2, t):
-    return (lerp(p1[0], p2[0], t), lerp(p1[1], p2[1], t))
-
-
-def generate_arc_points(center, radius_x, radius_y, start_angle_deg, end_angle_deg, num_points=12, clockwise=False):
-    """
-    Generate points along an elliptical arc around a center point.
-    Used to build the turn segments of the hybrid path.
-    """
-    points = []
-    if clockwise:
-        start_angle_deg, end_angle_deg = end_angle_deg, start_angle_deg
-
-    for i in range(num_points + 1):
-        t = i / float(num_points)
-        angle_deg = lerp(start_angle_deg, end_angle_deg, t)
-        angle_rad = math.radians(angle_deg)
-        x = float(center[0]) + radius_x * math.cos(angle_rad)
-        y = float(center[1]) + radius_y * math.sin(angle_rad)
-        points.append((x, y))
-
-    if clockwise:
-        points = list(reversed(points))
-
-    return points
 
 
 def identify_barrels_simple(all_barrel_detections):
@@ -512,7 +417,7 @@ def detect_pattern_direction(frame_metrics):
         return {
             "pattern_direction": "left",
             "actual_to_provisional_map": {"barrel1": "barrel1", "barrel2": "barrel2", "barrel3": "barrel3"},
-            "reason": "defaulted to left-first because early lower-barrel approach was unclear",
+            "reason": "defaulted to left-first",
             "confidence": 0.5,
             "method": "fallback_left",
         }
@@ -570,17 +475,14 @@ def find_barrel_apex(barrel_name, frame_metrics, min_approach_frames=2):
     valid = [m for m in frame_metrics if m["horse_detected"] and m.get(dist_key) is not None]
     if len(valid) < min_approach_frames:
         return None
-
     min_metric = min(valid, key=lambda m: m[dist_key])
     min_idx = valid.index(min_metric)
-
     if min_idx == 0:
         if len(valid) > 1:
             remaining = valid[1:]
             min_metric = min(remaining, key=lambda m: m[dist_key])
         else:
             return None
-
     return {
         "barrel_name": barrel_name,
         "start_frame": int(min_metric["frame_index"]),
@@ -670,7 +572,6 @@ def build_highlights(frame_metrics):
 
     best_turn = best_barrel
     focus_next = "Clean up the line and stay tighter around the weakest barrel."
-
     if available:
         weakest_barrel = max(available, key=lambda item: item[1])[0]
         if weakest_barrel == "barrel1":
@@ -697,302 +598,35 @@ def summarize_barrel_detections(all_barrel_detections):
     detected_frame_count = sum(1 for entry in all_barrel_detections if len(entry["barrels"]) > 0)
     total_barrel_boxes = len(centers)
     avg = total_barrel_boxes / detected_frame_count if detected_frame_count > 0 else 0.0
-
     return {"detected_frame_count": detected_frame_count, "total_barrel_boxes": total_barrel_boxes, "average_barrels_per_detected_frame": round(avg, 3), "top_barrel_centers": top_centers}
 
 
-# ─── Hybrid Path Builder ──────────────────────────────────────────────────────
+# ─── Ideal Path ───────────────────────────────────────────────────────────────
 
-def get_tracking_points_near_barrel(frame_metrics, barrel_name, barrel_center, arena_diagonal, radius_fraction=BARREL_NEAR_RADIUS_FRACTION):
+def build_left_first_ideal_waypoints():
     """
-    Extract actual horse tracking points that are within the turn zone of a barrel.
-    These are the real data points — they show how wide or tight the turn actually was.
+    Hardcoded ideal left-first barrel pattern waypoints in normalized 0-1 space.
+    This is the same path shown as the teal line in the frontend.
     """
-    radius = arena_diagonal * radius_fraction
-    dist_key = f"dist_to_{barrel_name}_px"
-    near_points = []
-
-    for metric in frame_metrics:
-        if not metric["horse_detected"]:
-            continue
-        if metric["horse_center"] is None:
-            continue
-        dist = metric.get(dist_key)
-        if dist is None:
-            continue
-        if dist <= radius:
-            near_points.append({
-                "point": (float(metric["horse_center"][0]), float(metric["horse_center"][1])),
-                "frame_index": metric["frame_index"],
-                "timestamp_seconds": metric["timestamp_seconds"],
-                "dist_to_barrel": dist,
-            })
-
-    # Sort by frame index to maintain temporal order
-    near_points.sort(key=lambda p: p["frame_index"])
-    return [p["point"] for p in near_points]
+    return [
+        (0.42, 0.95), (0.42, 0.88), (0.42, 0.80), (0.42, 0.72), (0.42, 0.65),
+        (0.48, 0.62), (0.56, 0.59), (0.64, 0.57), (0.72, 0.56), (0.80, 0.57),
+        (0.86, 0.59), (0.90, 0.55), (0.90, 0.50), (0.87, 0.46), (0.82, 0.44),
+        (0.74, 0.44), (0.67, 0.47), (0.63, 0.52), (0.63, 0.57), (0.66, 0.61),
+        (0.72, 0.64), (0.64, 0.65), (0.54, 0.66), (0.42, 0.66), (0.30, 0.65),
+        (0.20, 0.63), (0.12, 0.60), (0.07, 0.56), (0.06, 0.51), (0.08, 0.46),
+        (0.13, 0.43), (0.20, 0.42), (0.28, 0.44), (0.33, 0.49), (0.33, 0.55),
+        (0.30, 0.60), (0.26, 0.64), (0.34, 0.65), (0.40, 0.64), (0.42, 0.60),
+        (0.42, 0.52), (0.42, 0.43), (0.42, 0.34), (0.42, 0.26), (0.42, 0.20),
+        (0.43, 0.15), (0.46, 0.11), (0.50, 0.09), (0.55, 0.10), (0.58, 0.14),
+        (0.58, 0.19), (0.55, 0.23), (0.50, 0.25), (0.45, 0.23), (0.43, 0.19),
+        (0.42, 0.25), (0.42, 0.34), (0.42, 0.44), (0.42, 0.54), (0.42, 0.64),
+        (0.42, 0.74), (0.42, 0.84), (0.42, 0.95),
+    ]
 
 
-def build_guided_segment(start_point, end_point, num_points=8, control_offset_x=0.0, control_offset_y=0.0):
-    """
-    Build a smooth curved segment between two points using a quadratic bezier curve.
-    The control point can be offset to create natural-looking curves.
-    """
-    # Control point for the curve
-    mid_x = (float(start_point[0]) + float(end_point[0])) / 2.0 + control_offset_x
-    mid_y = (float(start_point[1]) + float(end_point[1])) / 2.0 + control_offset_y
-
-    points = []
-    for i in range(num_points + 1):
-        t = i / float(num_points)
-        # Quadratic bezier
-        x = (1 - t) ** 2 * float(start_point[0]) + 2 * (1 - t) * t * mid_x + t ** 2 * float(end_point[0])
-        y = (1 - t) ** 2 * float(start_point[1]) + 2 * (1 - t) * t * mid_y + t ** 2 * float(end_point[1])
-        points.append((x, y))
-    return points
-
-
-def build_hybrid_normalized_path(
-    smoothed_points,
-    frame_metrics,
-    identified_barrels,
-    barrel_geometry,
-    pattern_direction,
-    original_width,
-    original_height,
-):
-    """
-    Build a hybrid path that combines:
-    - Real tracking points near each barrel (shows actual wide/tight turns)
-    - Guided interpolation between barrels (always looks like a barrel run)
-
-    The result is normalized to 0-1 space anchored to the detected barrel positions.
-    """
-
-    if not identified_barrels or not barrel_geometry:
-        return [], None
-
-    top = barrel_geometry.get("top")
-    lower_left = barrel_geometry.get("lower_left")
-    lower_right = barrel_geometry.get("lower_right")
-
-    if top is None or lower_left is None or lower_right is None:
-        return [], None
-
-    # Arena dimensions for radius calculations
-    arena_diagonal = math.hypot(original_width, original_height)
-
-    # Get the three barrel centers in pixel space
-    b1 = identified_barrels.get("barrel1")
-    b2 = identified_barrels.get("barrel2")
-    b3 = identified_barrels.get("barrel3")
-
-    if not b1 or not b2 or not b3:
-        return [], None
-
-    b1_center = (float(b1["center_x"]), float(b1["center_y"]))
-    b2_center = (float(b2["center_x"]), float(b2["center_y"]))
-    b3_center = (float(b3["center_x"]), float(b3["center_y"]))
-
-    # Get real tracking points near each barrel
-    b1_turn_points = get_tracking_points_near_barrel(frame_metrics, "barrel1", b1_center, arena_diagonal)
-    b2_turn_points = get_tracking_points_near_barrel(frame_metrics, "barrel2", b2_center, arena_diagonal)
-    b3_turn_points = get_tracking_points_near_barrel(frame_metrics, "barrel3", b3_center, arena_diagonal)
-
-    # Determine start/home position
-    # Use the midpoint between barrel1 and barrel2 at the bottom of the arena
-    home_x = (b1_center[0] + b2_center[0]) / 2.0
-    home_y = max(b1_center[1], b2_center[1]) + (original_height - max(b1_center[1], b2_center[1])) * 0.4
-
-    # Build the full pixel-space path as segments
-    pixel_path = []
-
-    # ── Segment 1: Home → Approach Barrel 1 ──────────────────────────────────
-    # Use actual tracking points from the start of the run up to barrel 1 zone
-    # If we have real start points, use them; otherwise guide from home toward b1
-
-    early_tracking = []
-    for metric in frame_metrics:
-        if not metric["horse_detected"] or metric["horse_center"] is None:
-            continue
-        dist_b1 = metric.get("dist_to_barrel1_px")
-        if dist_b1 is not None and dist_b1 > arena_diagonal * BARREL_NEAR_RADIUS_FRACTION:
-            dist_b2 = metric.get("dist_to_barrel2_px")
-            dist_b3 = metric.get("dist_to_barrel3_px")
-            # Only include points that are far from all barrels (transit points)
-            if (dist_b2 is None or dist_b2 > arena_diagonal * BARREL_NEAR_RADIUS_FRACTION) and \
-               (dist_b3 is None or dist_b3 > arena_diagonal * BARREL_NEAR_RADIUS_FRACTION):
-                early_tracking.append({
-                    "point": (float(metric["horse_center"][0]), float(metric["horse_center"][1])),
-                    "frame_index": metric["frame_index"],
-                })
-
-    early_tracking.sort(key=lambda p: p["frame_index"])
-
-    # Start at home position
-    pixel_path.append((home_x, home_y))
-
-    # Add any real early transit points
-    if len(early_tracking) >= 2:
-        for pt in early_tracking[:3]:  # Take first few to show the approach direction
-            pixel_path.append(pt["point"])
-
-    # ── Segment 2: Barrel 1 Turn ─────────────────────────────────────────────
-    # Use real tracking points near barrel 1 — this shows wide vs tight
-    if len(b1_turn_points) >= 2:
-        # Smooth transition into the real turn points
-        approach_guide = build_guided_segment(
-            pixel_path[-1], b1_turn_points[0], num_points=4,
-            control_offset_x=(b1_center[0] - pixel_path[-1][0]) * 0.3,
-            control_offset_y=0.0
-        )
-        pixel_path.extend(approach_guide[1:])
-        pixel_path.extend(b1_turn_points)
-    else:
-        # No real turn points — build a synthetic turn using barrel position
-        # The turn radius shows as a default "average" turn
-        turn_radius_x = arena_diagonal * 0.10
-        turn_radius_y = arena_diagonal * 0.08
-
-        if pattern_direction == "right":
-            # Right pattern: barrel 1 is on the right, turn counterclockwise
-            approach_pt = (b1_center[0] + turn_radius_x * 0.5, b1_center[1] + turn_radius_y)
-            turn_pts = generate_arc_points(b1_center, turn_radius_x, turn_radius_y, 90, -90, num_points=10)
-        else:
-            # Left pattern: barrel 1 is on the left, turn clockwise
-            approach_pt = (b1_center[0] - turn_radius_x * 0.5, b1_center[1] + turn_radius_y)
-            turn_pts = generate_arc_points(b1_center, turn_radius_x, turn_radius_y, 90, 270, num_points=10)
-
-        guide = build_guided_segment(pixel_path[-1], approach_pt, num_points=4)
-        pixel_path.extend(guide[1:])
-        pixel_path.extend(turn_pts)
-
-    # ── Segment 3: Barrel 1 → Barrel 2 (guided crossover) ───────────────────
-    # The crossover between barrels is guided — always looks like a figure-8
-    b1_exit = pixel_path[-1]
-    crossover_control_y = (b1_center[1] + b2_center[1]) / 2.0
-
-    crossover = build_guided_segment(
-        b1_exit, b2_center,
-        num_points=8,
-        control_offset_x=0.0,
-        control_offset_y=(crossover_control_y - (b1_exit[1] + b2_center[1]) / 2.0) * 0.5
-    )
-    pixel_path.extend(crossover[1:])
-
-    # ── Segment 4: Barrel 2 Turn ─────────────────────────────────────────────
-    if len(b2_turn_points) >= 2:
-        approach_guide = build_guided_segment(
-            pixel_path[-1], b2_turn_points[0], num_points=4,
-            control_offset_x=(b2_center[0] - pixel_path[-1][0]) * 0.3,
-            control_offset_y=0.0
-        )
-        pixel_path.extend(approach_guide[1:])
-        pixel_path.extend(b2_turn_points)
-    else:
-        turn_radius_x = arena_diagonal * 0.10
-        turn_radius_y = arena_diagonal * 0.08
-
-        if pattern_direction == "right":
-            turn_pts = generate_arc_points(b2_center, turn_radius_x, turn_radius_y, 90, 270, num_points=10)
-        else:
-            turn_pts = generate_arc_points(b2_center, turn_radius_x, turn_radius_y, 90, -90, num_points=10)
-
-        pixel_path.extend(turn_pts)
-
-    # ── Segment 5: Barrel 2 → Barrel 3 (guided straight run up) ─────────────
-    b2_exit = pixel_path[-1]
-    run_to_3 = build_guided_segment(
-        b2_exit, b3_center,
-        num_points=8,
-        control_offset_x=(home_x - b2_exit[0]) * 0.3,
-        control_offset_y=0.0
-    )
-    pixel_path.extend(run_to_3[1:])
-
-    # ── Segment 6: Barrel 3 Turn ─────────────────────────────────────────────
-    if len(b3_turn_points) >= 2:
-        approach_guide = build_guided_segment(
-            pixel_path[-1], b3_turn_points[0], num_points=4
-        )
-        pixel_path.extend(approach_guide[1:])
-        pixel_path.extend(b3_turn_points)
-    else:
-        turn_radius_x = arena_diagonal * 0.07
-        turn_radius_y = arena_diagonal * 0.06
-        turn_pts = generate_arc_points(b3_center, turn_radius_x, turn_radius_y, 180, -180, num_points=12)
-        pixel_path.extend(turn_pts)
-
-    # ── Segment 7: Barrel 3 → Home ───────────────────────────────────────────
-    b3_exit = pixel_path[-1]
-    home_run = build_guided_segment(
-        b3_exit, (home_x, home_y),
-        num_points=8,
-        control_offset_x=0.0,
-        control_offset_y=0.0
-    )
-    pixel_path.extend(home_run[1:])
-
-    # ── Normalize to 0-1 space anchored to barrel geometry ───────────────────
-    left_x = float(lower_left["center_x"])
-    right_x = float(lower_right["center_x"])
-    top_y = float(top["center_y"])
-    path_y_values = [float(p[1]) for p in pixel_path]
-    max_path_y = max(path_y_values) if path_y_values else top_y + 1.0
-    if max_path_y <= top_y:
-        max_path_y = top_y + 1.0
-
-    if abs(right_x - left_x) < 1.0:
-        return [], None
-
-    normalized = []
-    for x, y in pixel_path:
-        nx = CANONICAL_LEFT_BARREL_X + (
-            (float(x) - left_x) / (right_x - left_x)
-        ) * (CANONICAL_RIGHT_BARREL_X - CANONICAL_LEFT_BARREL_X)
-        ny = CANONICAL_TOP_BARREL_Y + (
-            (float(y) - top_y) / max(max_path_y - top_y, 1e-9)
-        ) * (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y)
-        normalized.append([
-            round(clamp(float(nx), 0.02, 0.98), 4),
-            round(clamp(float(ny), 0.02, 0.98), 4),
-        ])
-
-    transform = {
-        "left_x": round(left_x, 3),
-        "right_x": round(right_x, 3),
-        "top_y": round(top_y, 3),
-        "max_path_y": round(max_path_y, 3),
-    }
-
-    return normalized, transform
-
-
-# ─── Legacy normalized path (fallback) ───────────────────────────────────────
-
-def build_normalized_actual_path(smoothed_points, barrel_geometry):
-    if not smoothed_points or not barrel_geometry:
-        return {"normalized_path": [], "transform": None}
-    top = barrel_geometry.get("top")
-    lower_left = barrel_geometry.get("lower_left")
-    lower_right = barrel_geometry.get("lower_right")
-    if top is None or lower_left is None or lower_right is None:
-        return {"normalized_path": [], "transform": None}
-    left_x = float(lower_left["center_x"])
-    right_x = float(lower_right["center_x"])
-    top_y = float(top["center_y"])
-    if abs(right_x - left_x) < 1e-6:
-        return {"normalized_path": [], "transform": None}
-    path_y_values = [float(p[1]) for p in smoothed_points]
-    max_path_y = max(path_y_values) if path_y_values else top_y + 1.0
-    if max_path_y <= top_y:
-        max_path_y = top_y + 1.0
-    normalized = []
-    for x, y in smoothed_points:
-        nx = CANONICAL_LEFT_BARREL_X + ((float(x) - left_x) / (right_x - left_x)) * (CANONICAL_RIGHT_BARREL_X - CANONICAL_LEFT_BARREL_X)
-        ny = CANONICAL_TOP_BARREL_Y + ((float(y) - top_y) / max(max_path_y - top_y, 1e-9)) * (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y)
-        normalized.append((clamp(float(nx), 0.02, 0.98), clamp(float(ny), 0.02, 0.98)))
-    return {"normalized_path": normalized, "transform": {"left_x": round(left_x, 3), "right_x": round(right_x, 3), "top_y": round(top_y, 3), "max_path_y": round(max_path_y, 3)}}
+def mirror_points_horiz(points):
+    return [(1.0 - float(x), float(y)) for x, y in points]
 
 
 def resample_polyline(points, num_samples=100):
@@ -1000,9 +634,10 @@ def resample_polyline(points, num_samples=100):
         return []
     if len(points) == 1:
         return [points[0] for _ in range(num_samples)]
-    points = dedupe_points(points, min_dist=1.0)
+    points = list(dedupe_points(list(points), min_dist=0.001))
     if len(points) == 1:
         return [points[0] for _ in range(num_samples)]
+
     segment_lengths = []
     cumulative = [0.0]
     total = 0.0
@@ -1011,8 +646,10 @@ def resample_polyline(points, num_samples=100):
         segment_lengths.append(seg_len)
         total += seg_len
         cumulative.append(total)
+
     if total <= 1e-9:
         return [points[0] for _ in range(num_samples)]
+
     samples = []
     for i in range(num_samples):
         target = (total * i) / max(num_samples - 1, 1)
@@ -1033,29 +670,208 @@ def resample_polyline(points, num_samples=100):
     return samples
 
 
-def mirror_points_horiz(points):
-    return [(1.0 - float(x), float(y)) for x, y in points]
-
-
-def build_left_first_ideal_waypoints():
-    return [
-        (0.50, 0.94), (0.46, 0.90), (0.40, 0.86), (0.34, 0.82), (0.28, 0.77),
-        (0.22, 0.72), (0.18, 0.66), (0.18, 0.60), (0.22, 0.56), (0.30, 0.56),
-        (0.38, 0.60), (0.46, 0.65), (0.56, 0.68), (0.66, 0.68), (0.74, 0.66),
-        (0.80, 0.62), (0.82, 0.58), (0.80, 0.54), (0.74, 0.52), (0.66, 0.54),
-        (0.58, 0.58), (0.54, 0.64), (0.52, 0.56), (0.51, 0.46), (0.50, 0.36),
-        (0.49, 0.28), (0.48, 0.22), (0.46, 0.16), (0.44, 0.12), (0.44, 0.10),
-        (0.46, 0.08), (0.50, 0.08), (0.54, 0.08), (0.56, 0.10), (0.56, 0.13),
-        (0.54, 0.18), (0.52, 0.24), (0.51, 0.32), (0.50, 0.42), (0.50, 0.54),
-        (0.48, 0.66), (0.46, 0.78), (0.45, 0.88), (0.45, 0.94),
-    ]
-
-
 def build_ideal_template_path(direction, num_samples=100):
     left_points = build_left_first_ideal_waypoints()
     path = mirror_points_horiz(left_points) if direction == "right" else left_points
     return resample_polyline(path, num_samples=num_samples)
 
+
+# ─── Warped Actual Path ───────────────────────────────────────────────────────
+
+def get_closest_horse_point_to_barrel(frame_metrics, barrel_name, barrel_center_px, arena_diagonal):
+    """
+    Find the actual horse tracking point closest to a barrel.
+    This is the most reliable single data point we have for each turn.
+    Returns the horse position in pixel space, or None if not found.
+    """
+    dist_key = f"dist_to_{barrel_name}_px"
+    radius = arena_diagonal * BARREL_NEAR_RADIUS_FRACTION
+
+    candidates = []
+    for metric in frame_metrics:
+        if not metric["horse_detected"] or metric["horse_center"] is None:
+            continue
+        dist = metric.get(dist_key)
+        if dist is not None and dist <= radius:
+            candidates.append({
+                "point": (float(metric["horse_center"][0]), float(metric["horse_center"][1])),
+                "dist": dist,
+            })
+
+    if not candidates:
+        return None
+
+    # Return the point closest to the barrel
+    best = min(candidates, key=lambda c: c["dist"])
+    return best["point"]
+
+
+def build_warped_actual_path(
+    frame_metrics,
+    identified_barrels,
+    barrel_geometry,
+    direction,
+    original_width,
+    original_height,
+):
+    """
+    Build the "Your Path" line by:
+    1. Starting with the hardcoded ideal path (always looks like a barrel run)
+    2. At each barrel, measuring where the horse actually was vs where the ideal path passes
+    3. Warping the ideal path toward the actual horse position at each barrel zone
+    4. Smoothly blending between warped and unwarped sections
+
+    Result: always looks like a barrel pattern, but shows real deviation at each turn.
+    """
+
+    if not identified_barrels or not barrel_geometry:
+        return []
+
+    top = barrel_geometry.get("top")
+    lower_left = barrel_geometry.get("lower_left")
+    lower_right = barrel_geometry.get("lower_right")
+
+    if top is None or lower_left is None or lower_right is None:
+        return []
+
+    arena_diagonal = math.hypot(original_width, original_height)
+
+    # Get detected barrel centers in pixel space
+    b1 = identified_barrels.get("barrel1")
+    b2 = identified_barrels.get("barrel2")
+    b3 = identified_barrels.get("barrel3")
+
+    if not b1 or not b2 or not b3:
+        return []
+
+    b1_px = (float(b1["center_x"]), float(b1["center_y"]))
+    b2_px = (float(b2["center_x"]), float(b2["center_y"]))
+    b3_px = (float(b3["center_x"]), float(b3["center_y"]))
+
+    # Find actual horse positions near each barrel in pixel space
+    h1_px = get_closest_horse_point_to_barrel(frame_metrics, "barrel1", b1_px, arena_diagonal)
+    h2_px = get_closest_horse_point_to_barrel(frame_metrics, "barrel2", b2_px, arena_diagonal)
+    h3_px = get_closest_horse_point_to_barrel(frame_metrics, "barrel3", b3_px, arena_diagonal)
+
+    # Build coordinate transform from pixel space to normalized space
+    left_x = float(lower_left["center_x"])
+    right_x = float(lower_right["center_x"])
+    top_y = float(top["center_y"])
+
+    if abs(right_x - left_x) < 1.0:
+        return []
+
+    # Estimate home y in pixel space
+    home_y_px = top_y + (original_height - top_y) * 0.85
+
+    def px_to_norm(px_point):
+        """Convert pixel coordinates to normalized 0-1 space."""
+        x, y = px_point
+        nx = CANONICAL_LEFT_BARREL_X + (
+            (float(x) - left_x) / (right_x - left_x)
+        ) * (CANONICAL_RIGHT_BARREL_X - CANONICAL_LEFT_BARREL_X)
+        ny = CANONICAL_TOP_BARREL_Y + (
+            (float(y) - top_y) / max(home_y_px - top_y, 1e-9)
+        ) * (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y)
+        return (clamp(float(nx), 0.02, 0.98), clamp(float(ny), 0.02, 0.98))
+
+    # Get the ideal path in normalized space (same as teal line)
+    ideal_path = build_ideal_template_path(direction, num_samples=80)
+
+    # Convert actual horse barrel positions to normalized space
+    h1_norm = px_to_norm(h1_px) if h1_px else None
+    h2_norm = px_to_norm(h2_px) if h2_px else None
+    h3_norm = px_to_norm(h3_px) if h3_px else None
+
+    # Ideal barrel positions in normalized space (where the ideal path passes near each barrel)
+    # These are the canonical positions the ideal path is built around
+    if direction == "right":
+        ideal_b1_norm = (0.78, 0.50)  # right barrel
+        ideal_b2_norm = (0.22, 0.50)  # left barrel
+        ideal_b3_norm = (0.50, 0.17)  # top barrel
+    else:
+        ideal_b1_norm = (0.22, 0.50)  # left barrel
+        ideal_b2_norm = (0.78, 0.50)  # right barrel
+        ideal_b3_norm = (0.50, 0.17)  # top barrel
+
+    # Calculate offsets: how far did the horse deviate from the ideal at each barrel
+    # Positive offset means horse was wider/different than ideal
+    offsets = {}
+
+    if h1_norm:
+        offsets["barrel1"] = (
+            h1_norm[0] - ideal_b1_norm[0],
+            h1_norm[1] - ideal_b1_norm[1],
+        )
+    else:
+        offsets["barrel1"] = (0.0, 0.0)
+
+    if h2_norm:
+        offsets["barrel2"] = (
+            h2_norm[0] - ideal_b2_norm[0],
+            h2_norm[1] - ideal_b2_norm[1],
+        )
+    else:
+        offsets["barrel2"] = (0.0, 0.0)
+
+    if h3_norm:
+        offsets["barrel3"] = (
+            h3_norm[0] - ideal_b3_norm[0],
+            h3_norm[1] - ideal_b3_norm[1],
+        )
+    else:
+        offsets["barrel3"] = (0.0, 0.0)
+
+    # Now warp the ideal path using these offsets
+    # The warp influence falls off with distance from each barrel
+    # so the path only deviates near each barrel, not everywhere
+    WARP_RADIUS = 0.25  # normalized radius of influence around each barrel
+
+    def warp_influence(point, barrel_norm, radius):
+        """Gaussian falloff — full warp at barrel, zero warp far away."""
+        d = distance(point, barrel_norm)
+        if d >= radius:
+            return 0.0
+        return 1.0 - (d / radius)
+
+    warped_path = []
+    for pt in ideal_path:
+        x, y = float(pt[0]), float(pt[1])
+
+        # Calculate total warp at this point from all three barrels
+        total_offset_x = 0.0
+        total_offset_y = 0.0
+        total_weight = 0.0
+
+        for barrel_name, barrel_norm in [
+            ("barrel1", ideal_b1_norm),
+            ("barrel2", ideal_b2_norm),
+            ("barrel3", ideal_b3_norm),
+        ]:
+            influence = warp_influence((x, y), barrel_norm, WARP_RADIUS)
+            if influence > 0:
+                ox, oy = offsets[barrel_name]
+                total_offset_x += influence * ox
+                total_offset_y += influence * oy
+                total_weight += influence
+
+        if total_weight > 0:
+            # Cap the maximum warp to prevent extreme distortion
+            max_warp = 0.20
+            total_offset_x = clamp(total_offset_x, -max_warp, max_warp)
+            total_offset_y = clamp(total_offset_y, -max_warp, max_warp)
+            x += total_offset_x
+            y += total_offset_y
+
+        warped_path.append([
+            round(clamp(x, 0.02, 0.98), 4),
+            round(clamp(y, 0.02, 0.98), 4),
+        ])
+
+    return warped_path
+
+
+# ─── Draw / Save ──────────────────────────────────────────────────────────────
 
 def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, frame_index, timestamp_seconds):
     overlay = frame.copy()
@@ -1064,13 +880,6 @@ def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, 
         conf = barrel.get("confidence")
         cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
         cv2.putText(overlay, f"barrel {conf}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 2, cv2.LINE_AA)
-    if identified_barrels:
-        for barrel_name, barrel_info in identified_barrels.items():
-            if barrel_info is None:
-                continue
-            x = int(barrel_info["center_x"]); y = int(barrel_info["center_y"])
-            cv2.circle(overlay, (x, y), 12, (255, 255, 0), 2)
-            cv2.putText(overlay, barrel_name.upper(), (x + 8, max(20, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2, cv2.LINE_AA)
     if horse_detection:
         x1, y1, x2, y2 = [int(v) for v in horse_detection["bbox"]]
         cx, cy = [int(v) for v in horse_detection["tracking_point"]]
@@ -1084,7 +893,7 @@ def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, 
     return overlay
 
 
-def save_path_map(width, height, smoothed_points, out_path, identified_barrels=None, normalized_actual_path=None, template_path=None):
+def save_path_map(width, height, smoothed_points, out_path, identified_barrels=None):
     canvas_width = min(width, 960)
     canvas_height = min(height, 540)
     scale_x = canvas_width / float(max(width, 1))
@@ -1094,8 +903,6 @@ def save_path_map(width, height, smoothed_points, out_path, identified_barrels=N
         p1 = (int(smoothed_points[i - 1][0] * scale_x), int(smoothed_points[i - 1][1] * scale_y))
         p2 = (int(smoothed_points[i][0] * scale_x), int(smoothed_points[i][1] * scale_y))
         cv2.line(canvas, p1, p2, (255, 0, 0), 3)
-    for pt in smoothed_points:
-        cv2.circle(canvas, (int(pt[0] * scale_x), int(pt[1] * scale_y)), 4, (0, 0, 255), -1)
     if identified_barrels:
         for barrel_name, barrel_info in identified_barrels.items():
             if barrel_info is None:
@@ -1106,6 +913,8 @@ def save_path_map(width, height, smoothed_points, out_path, identified_barrels=N
             cv2.putText(canvas, barrel_name.upper(), (x + 8, max(20, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 120, 255), 2, cv2.LINE_AA)
     safe_imwrite(out_path, canvas)
 
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     video_path = sys.argv[1] if len(sys.argv) > 1 else None
@@ -1151,18 +960,15 @@ def main():
 
         log_err(f"Video opened. frame_count={frame_count}, fps={round(fps, 3)}, width={original_width}, height={original_height}, duration={round(duration, 3)}")
 
-        # ── Phase 1: Base sampling pass ───────────────────────────────────────
         sample_indices = build_sample_frame_indices(frame_count, fps)
         max_jump = adaptive_max_jump(original_width, original_height)
 
         sampled_frames = []
         all_barrel_detections = []
-
         horse_detected_count = 0
         read_success_count = 0
         rejected_jump_count = 0
         missed_detection_count = 0
-
         raw_trajectory_points = []
         accepted_points = []
         track_points = []
@@ -1255,7 +1061,7 @@ def main():
                 "rejection_reason": rejection_reason,
             })
 
-        # ── Process base tracking ─────────────────────────────────────────────
+        # ── Process results ───────────────────────────────────────────────────
         interpolated_track = interpolate_small_gaps(track_points, max_gap=INTERPOLATION_MAX_GAP)
         smoothed_points = [p for p in interpolated_track if p is not None]
         smoothed_points = smooth_points(smoothed_points, alpha=SMOOTHING_ALPHA)
@@ -1272,77 +1078,19 @@ def main():
 
         turns = build_turns(frame_metrics)
         turns = enforce_turn_order(turns, pattern_direction_info["pattern_direction"])
-
-        # ── Phase 2: Extra sampling near barrel turns ─────────────────────────
-        # Now that we know where the turns are, sample extra frames there
-        enhanced_indices = build_barrel_zone_extra_frames(sample_indices, frame_count, fps, turns)
-        new_indices = sorted(set(enhanced_indices) - set(sample_indices))
-
-        if new_indices:
-            log_err(f"Phase 2: sampling {len(new_indices)} additional frames near barrel turns")
-
-            for target_frame in new_indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    continue
-
-                timestamp_seconds = round(target_frame / fps, 3) if fps > 0 else None
-                inference_frame, x_ratio, y_ratio = resize_for_inference(frame)
-
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    horse_results = horse_model.predict(source=inference_frame, conf=HORSE_CONFIDENCE_THRESHOLD, classes=[HORSE_CLASS_ID], verbose=False)
-
-                candidates = []
-                if horse_results and len(horse_results) > 0:
-                    candidates = build_horse_candidates(horse_results[0], x_ratio=x_ratio, y_ratio=y_ratio)
-
-                if candidates:
-                    best = max(candidates, key=lambda c: c["confidence"])
-                    horse_center = best["tracking_point"]
-
-                    # Add this as a frame metric directly
-                    barrel_dists = {}
-                    for barrel_name in ("barrel1", "barrel2", "barrel3"):
-                        barrel_info = identified_barrels.get(barrel_name)
-                        if barrel_info:
-                            barrel_center = (float(barrel_info["center_x"]), float(barrel_info["center_y"]))
-                            barrel_dists[barrel_name] = distance(horse_center, barrel_center)
-                        else:
-                            barrel_dists[barrel_name] = None
-
-                    available = [(k, v) for k, v in barrel_dists.items() if v is not None]
-                    nearest_barrel = min(available, key=lambda item: item[1])[0] if available else None
-                    nearest_dist = min(available, key=lambda item: item[1])[1] if available else None
-
-                    frame_metrics.append({
-                        "frame_index": int(target_frame),
-                        "timestamp_seconds": timestamp_seconds,
-                        "horse_detected": True,
-                        "horse_center": [round(float(horse_center[0]), 2), round(float(horse_center[1]), 2)],
-                        "nearest_barrel": nearest_barrel,
-                        "nearest_barrel_distance_px": round_or_none(nearest_dist, 2),
-                        "dist_to_barrel1_px": round_or_none(barrel_dists.get("barrel1"), 2),
-                        "dist_to_barrel2_px": round_or_none(barrel_dists.get("barrel2"), 2),
-                        "dist_to_barrel3_px": round_or_none(barrel_dists.get("barrel3"), 2),
-                    })
-
-            # Re-sort frame metrics by frame index
-            frame_metrics.sort(key=lambda m: m["frame_index"])
-
-            # Rebuild turns with enhanced frame metrics
-            turns = build_turns(frame_metrics)
-            turns = enforce_turn_order(turns, pattern_direction_info["pattern_direction"])
-
-        # ── Build final outputs ───────────────────────────────────────────────
         splits = build_splits(turns, frame_metrics)
         highlights = build_highlights(frame_metrics)
-        direction = pattern_direction_info.get("pattern_direction") or "left"
-        ideal_template_path = build_ideal_template_path(direction, num_samples=100)
 
-        # Build the hybrid path — real turns + guided transit
-        hybrid_path, hybrid_transform = build_hybrid_normalized_path(
-            smoothed_points,
+        direction = pattern_direction_info.get("pattern_direction") or "left"
+
+        # ── Build ideal template path ─────────────────────────────────────────
+        ideal_template_path = build_ideal_template_path(direction, num_samples=80)
+
+        # ── Build warped actual path ──────────────────────────────────────────
+        # This is the "Your Path" line — ideal path warped by actual horse
+        # positions detected near each barrel. Always looks like a barrel run
+        # but shows real deviation at each turn.
+        warped_actual_path = build_warped_actual_path(
             frame_metrics,
             identified_barrels,
             barrel_geometry,
@@ -1351,11 +1099,9 @@ def main():
             original_height,
         )
 
-        # Fall back to legacy normalization if hybrid fails
-        if not hybrid_path:
-            legacy = build_normalized_actual_path(smoothed_points, barrel_geometry)
-            hybrid_path = [[p[0], p[1]] for p in legacy["normalized_path"]]
-            hybrid_transform = legacy["transform"]
+        # Fall back to ideal path if warp fails (e.g. barrels not detected)
+        if not warped_actual_path:
+            warped_actual_path = [[round(p[0], 4), round(p[1], 4)] for p in ideal_template_path]
 
         path_map_path = None
         if len(smoothed_points) > 2:
@@ -1386,7 +1132,6 @@ def main():
             insights.append(highlights["focus_next"])
 
         smoothed_path_points = [round_point(pt, 2) for pt in smoothed_points]
-        normalized_smoothed_path_points = hybrid_path  # Use hybrid path for frontend overlay
 
         output = {
             "ok": True,
@@ -1402,7 +1147,8 @@ def main():
             "accepted_trajectory_point_count": len(accepted_points),
             "smoothed_trajectory_point_count": len(smoothed_points),
             "smoothed_path_points": smoothed_path_points,
-            "normalized_smoothed_path_points": normalized_smoothed_path_points,
+            # This is what the frontend renders as "Your Path"
+            "normalized_smoothed_path_points": warped_actual_path,
             "path_map_path": path_map_path,
             "tracking_quality": tracking_quality,
             "barrel_detection_summary": barrel_detection_summary,
@@ -1413,9 +1159,9 @@ def main():
             "turns": turns,
             "splits": splits,
             "barrel_metrics": {"barrel1": None, "barrel2": None, "barrel3": None},
-            "normalized_actual_path_transform": hybrid_transform,
-            "normalized_actual_template_path": hybrid_path,
-            "ideal_template_path": [round_point(p, 4) for p in ideal_template_path],
+            "normalized_actual_path_transform": None,
+            "normalized_actual_template_path": warped_actual_path,
+            "ideal_template_path": [[round(p[0], 4), round(p[1], 4)] for p in ideal_template_path],
             "template_path_comparison": None,
             "speed_scores": {"barrel1": None, "barrel2": None, "barrel3": None},
             "highlights": highlights,
