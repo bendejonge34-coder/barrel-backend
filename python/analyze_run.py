@@ -7,49 +7,62 @@ import contextlib
 import io
 import traceback
 
+# ─── Environment Setup ────────────────────────────────────────────────────────
+
 os.environ["YOLO_CONFIG_DIR"] = "/tmp/Ultralytics"
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 from ultralytics import YOLO
 
+# ─── Paths ────────────────────────────────────────────────────────────────────
+
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 BARREL_MODEL_PATH = os.path.join(
-    BASE_DIR,
-    "runs",
-    "detect",
-    "runs_detect",
-    "barrel_detector_local",
-    "weights",
-    "best.pt",
+    BASE_DIR, "runs", "detect", "runs_detect",
+    "barrel_detector_local", "weights", "best.pt"
 )
-
 HORSE_MODEL_PATH = os.path.join(BASE_DIR, "yolov8n.pt")
 
+# ─── Detection Constants ──────────────────────────────────────────────────────
+
 HORSE_CLASS_ID = 17
-
 HORSE_CONFIDENCE_THRESHOLD = 0.18
-BARREL_CONFIDENCE_THRESHOLD = 0.48
+BARREL_CONFIDENCE_THRESHOLD = 0.45
 
+# Sampling — base pass
 TARGET_SAMPLE_FPS = 2.0
 MIN_SAMPLED_FRAMES = 12
-MAX_SAMPLED_FRAMES = 20
+MAX_SAMPLED_FRAMES = 24
 
+# Dense sampling around barrel apex zones
+DENSE_SAMPLE_FPS = 8.0
+DENSE_WINDOW_SECONDS = 1.2
+
+# Inference size
 MAX_INFERENCE_WIDTH = 576
 MAX_INFERENCE_HEIGHT = 324
 
-SMOOTHING_ALPHA = 0.34
-INTERPOLATION_MAX_GAP = 3
+# Trajectory
+SMOOTHING_ALPHA = 0.30
+INTERPOLATION_MAX_GAP = 4
+MAX_JUMP_FRACTION = 0.15
 
+# Barrel geometry canonical coords (normalized 0-1)
 CANONICAL_LEFT_BARREL_X = 0.24
 CANONICAL_RIGHT_BARREL_X = 0.76
-CANONICAL_TOP_BARREL_X = 0.50
 CANONICAL_TOP_BARREL_Y = 0.22
-CANONICAL_LOWER_BARREL_Y = 0.68
 CANONICAL_HOME_Y = 0.94
-
 BARREL_NEAR_RADIUS_FRACTION = 0.28
 
+# Split sanity bounds
+MIN_SPLIT_SECONDS = 0.3
+MAX_SPLIT_SECONDS = 15.0
+MIN_RUN_TIME = 5.0
+MAX_RUN_TIME = 60.0
+
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
 
 def log_err(*args):
     print(*args, file=sys.stderr, flush=True)
@@ -67,8 +80,19 @@ def fail(message, extra=None):
     emit_json(payload)
 
 
+# ─── Math Utilities ───────────────────────────────────────────────────────────
+
 def clamp(value, min_value, max_value):
     return max(min_value, min(max_value, value))
+
+
+def distance(p1, p2):
+    return math.hypot(float(p1[0]) - float(p2[0]), float(p1[1]) - float(p2[1]))
+
+
+def average_values(values):
+    values = [float(v) for v in values if v is not None]
+    return (sum(values) / len(values)) if values else None
 
 
 def round_or_none(value, decimals=2):
@@ -83,8 +107,30 @@ def round_point(point, decimals=2):
     return [round(float(point[0]), decimals), round(float(point[1]), decimals)]
 
 
-def distance(p1, p2):
-    return math.hypot(float(p1[0]) - float(p2[0]), float(p1[1]) - float(p2[1]))
+# ─── Model Loading ────────────────────────────────────────────────────────────
+
+def load_model(model_path):
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model not found: {model_path}")
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return YOLO(model_path)
+
+
+# ─── Frame Utilities ──────────────────────────────────────────────────────────
+
+def resize_for_inference(frame):
+    if frame is None:
+        return None, 1.0, 1.0
+    h, w = frame.shape[:2]
+    if w <= 0 or h <= 0:
+        return frame, 1.0, 1.0
+    scale = min(MAX_INFERENCE_WIDTH / float(w), MAX_INFERENCE_HEIGHT / float(h), 1.0)
+    if scale >= 1.0:
+        return frame, 1.0, 1.0
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return resized, w / float(new_w), h / float(new_h)
 
 
 def safe_imwrite(output_path, image):
@@ -99,44 +145,17 @@ def safe_imwrite(output_path, image):
         return False
 
 
-def load_model(model_path):
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        return YOLO(model_path)
+def read_frame_at(cap, frame_index):
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    ret, frame = cap.read()
+    return frame if (ret and frame is not None) else None
 
 
-def resize_for_inference(frame):
-    if frame is None:
-        return None, 1.0, 1.0
-    h, w = frame.shape[:2]
-    if w <= 0 or h <= 0:
-        return frame, 1.0, 1.0
-    width_scale = MAX_INFERENCE_WIDTH / float(w)
-    height_scale = MAX_INFERENCE_HEIGHT / float(h)
-    scale = min(width_scale, height_scale, 1.0)
-    if scale >= 1.0:
-        return frame, 1.0, 1.0
-    new_w = max(1, int(round(w * scale)))
-    new_h = max(1, int(round(h * scale)))
-    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-    x_ratio = w / float(new_w)
-    y_ratio = h / float(new_h)
-    return resized, x_ratio, y_ratio
+# ─── Frame Index Builders ─────────────────────────────────────────────────────
 
-
-def compute_bottom_center(box):
-    x1, y1, x2, y2 = box
-    cx = (x1 + x2) / 2.0
-    cy = y2
-    return cx, cy
-
-
-def build_sample_frame_indices(frame_count, fps):
-    if frame_count <= 0:
+def build_base_sample_indices(frame_count, fps):
+    if frame_count <= 0 or fps <= 0:
         return []
-    if fps <= 0:
-        fps = 30.0
     step = max(1, int(round(fps / TARGET_SAMPLE_FPS)))
     indices = list(range(0, frame_count, step))
     if not indices:
@@ -145,99 +164,106 @@ def build_sample_frame_indices(frame_count, fps):
         indices.append(frame_count - 1)
     if len(indices) < MIN_SAMPLED_FRAMES and frame_count > MIN_SAMPLED_FRAMES:
         desired = min(MIN_SAMPLED_FRAMES, frame_count)
-        indices = sorted(set(int(round(i * (frame_count - 1) / max(desired - 1, 1))) for i in range(desired)))
+        indices = [int(round(i * (frame_count - 1) / max(desired - 1, 1))) for i in range(desired)]
     if len(indices) > MAX_SAMPLED_FRAMES:
         desired = MAX_SAMPLED_FRAMES
-        indices = sorted(set(int(round(i * (frame_count - 1) / max(desired - 1, 1))) for i in range(desired)))
+        indices = [int(round(i * (frame_count - 1) / max(desired - 1, 1))) for i in range(desired)]
     return sorted(set(indices))
 
 
-def build_horse_candidates(result, x_ratio=1.0, y_ratio=1.0):
+def build_dense_indices_around_apexes(apex_timestamps, fps, frame_count, existing_indices):
+    if not apex_timestamps or fps <= 0:
+        return existing_indices
+    dense_step = max(1, int(round(fps / DENSE_SAMPLE_FPS)))
+    window_frames = int(DENSE_WINDOW_SECONDS * fps)
+    extra = set()
+    for ts in apex_timestamps:
+        if ts is None:
+            continue
+        center_frame = int(ts * fps)
+        start = max(0, center_frame - window_frames)
+        end = min(frame_count - 1, center_frame + window_frames)
+        for f in range(start, end + 1, dense_step):
+            extra.add(f)
+    return sorted(set(existing_indices) | extra)
+
+
+# ─── Horse Detection ──────────────────────────────────────────────────────────
+
+def detect_horse_candidates(result, x_ratio=1.0, y_ratio=1.0):
     if result.boxes is None or len(result.boxes) == 0:
         return []
-    boxes_xyxy = result.boxes.xyxy.cpu().tolist()
-    classes = result.boxes.cls.cpu().tolist()
-    confidences = result.boxes.conf.cpu().tolist()
     candidates = []
-    for box, cls_id, conf in zip(boxes_xyxy, classes, confidences):
+    for box, cls_id, conf in zip(
+        result.boxes.xyxy.cpu().tolist(),
+        result.boxes.cls.cpu().tolist(),
+        result.boxes.conf.cpu().tolist(),
+    ):
         if int(cls_id) != HORSE_CLASS_ID:
             continue
-        x1, y1, x2, y2 = box
-        x1 *= x_ratio
-        y1 *= y_ratio
-        x2 *= x_ratio
-        y2 *= y_ratio
-        cx, cy = compute_bottom_center((x1, y1, x2, y2))
-        area = max(0.0, (x2 - x1) * (y2 - y1))
+        x1 = box[0] * x_ratio
+        y1 = box[1] * y_ratio
+        x2 = box[2] * x_ratio
+        y2 = box[3] * y_ratio
+        cx = (x1 + x2) / 2.0
         h = max(0.0, y2 - y1)
+        area = max(0.0, (x2 - x1) * h)
         tracking_point = (float(cx), float(y2 - h * 0.10))
         candidates.append({
             "confidence": round(float(conf), 4),
-            "bbox": [round(float(x1), 2), round(float(y1), 2), round(float(x2), 2), round(float(y2), 2)],
-            "center": [round(float(cx), 2), round(float(cy), 2)],
+            "bbox": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
+            "center": [round(cx, 2), round(float((y1 + y2) / 2.0), 2)],
             "tracking_point": tracking_point,
             "area": float(area),
         })
     return candidates
 
 
-def choose_best_horse_candidate(candidates, prev_point, frame_width, frame_height):
+def choose_best_horse(candidates, prev_point, frame_width, frame_height):
     if not candidates:
         return None
     if prev_point is None:
-        return max(candidates, key=lambda c: (c["confidence"], c["area"]))
-    diagonal = math.hypot(frame_width, frame_height) if frame_width > 0 and frame_height > 0 else 1.0
-    best = None
-    best_score = None
+        return max(candidates, key=lambda c: (c["confidence"] * 2.0 + c["area"] / 50000.0))
+    diagonal = math.hypot(frame_width, frame_height) or 1.0
+    best, best_score = None, None
     for c in candidates:
-        dist = distance(prev_point, c["tracking_point"])
-        normalized_dist = dist / diagonal
-        score = (c["confidence"] * 2.15) + min(c["area"] / 45000.0, 1.1) - (normalized_dist * 2.1)
+        norm_dist = distance(prev_point, c["tracking_point"]) / diagonal
+        score = (c["confidence"] * 2.5) + min(c["area"] / 40000.0, 1.2) - (norm_dist * 2.4)
         if best_score is None or score > best_score:
             best_score = score
             best = c
     return best
 
 
-def detect_barrels_in_frame(frame, barrel_model, confidence_threshold=BARREL_CONFIDENCE_THRESHOLD):
+# ─── Barrel Detection ─────────────────────────────────────────────────────────
+
+def detect_barrels(frame, barrel_model, x_ratio=1.0, y_ratio=1.0):
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        results = barrel_model.predict(source=frame, conf=confidence_threshold, verbose=False)
+        results = barrel_model.predict(source=frame, conf=BARREL_CONFIDENCE_THRESHOLD, verbose=False)
     barrels = []
-    if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+    if not results or results[0].boxes is None:
         return barrels
     for box in results[0].boxes:
         x1, y1, x2, y2 = box.xyxy[0].tolist()
         conf = float(box.conf[0].item())
         barrels.append({
-            "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2),
+            "x1": round(x1 * x_ratio, 2), "y1": round(y1 * y_ratio, 2),
+            "x2": round(x2 * x_ratio, 2), "y2": round(y2 * y_ratio, 2),
             "confidence": round(conf, 3),
-            "center_x": float((x1 + x2) / 2.0),
-            "center_y": float((y1 + y2) / 2.0),
+            "center_x": round(((x1 + x2) / 2.0) * x_ratio, 2),
+            "center_y": round(((y1 + y2) / 2.0) * y_ratio, 2),
         })
     return barrels
 
 
-def scale_barrels_to_original(barrels, x_ratio, y_ratio):
-    scaled = []
-    for barrel in barrels:
-        scaled.append({
-            "x1": int(round(float(barrel["x1"]) * x_ratio)),
-            "y1": int(round(float(barrel["y1"]) * y_ratio)),
-            "x2": int(round(float(barrel["x2"]) * x_ratio)),
-            "y2": int(round(float(barrel["y2"]) * y_ratio)),
-            "confidence": barrel["confidence"],
-            "center_x": int(round(float(barrel["center_x"]) * x_ratio)),
-            "center_y": int(round(float(barrel["center_y"]) * y_ratio)),
-        })
-    return scaled
-
+# ─── Trajectory Smoothing ─────────────────────────────────────────────────────
 
 def adaptive_max_jump(width, height):
-    diagonal = math.hypot(width, height) if width > 0 and height > 0 else 1000.0
-    return clamp(diagonal * 0.15, 100.0, 320.0)
+    diagonal = math.hypot(width, height) or 1000.0
+    return clamp(diagonal * MAX_JUMP_FRACTION, 80.0, 350.0)
 
 
-def interpolate_small_gaps(track_points, max_gap=INTERPOLATION_MAX_GAP):
+def interpolate_gaps(track_points, max_gap=INTERPOLATION_MAX_GAP):
     if not track_points:
         return []
     result = list(track_points)
@@ -251,32 +277,31 @@ def interpolate_small_gaps(track_points, max_gap=INTERPOLATION_MAX_GAP):
         j = i
         while j < n and result[j] is None:
             j += 1
-        gap_end = j
-        gap_len = gap_end - i
-        if (gap_start >= 0 and gap_end < n and
-                result[gap_start] is not None and result[gap_end] is not None and
-                gap_len <= max_gap):
-            p1 = result[gap_start]
-            p2 = result[gap_end]
+        gap_len = j - i
+        if (gap_start >= 0 and j < n
+                and result[gap_start] is not None and result[j] is not None
+                and gap_len <= max_gap):
+            p1, p2 = result[gap_start], result[j]
             for k in range(1, gap_len + 1):
                 t = k / float(gap_len + 1)
-                x = float(p1[0]) + t * (float(p2[0]) - float(p1[0]))
-                y = float(p1[1]) + t * (float(p2[1]) - float(p1[1]))
-                result[gap_start + k] = (x, y)
-        i = gap_end
+                result[gap_start + k] = (
+                    float(p1[0]) + t * (float(p2[0]) - float(p1[0])),
+                    float(p1[1]) + t * (float(p2[1]) - float(p1[1])),
+                )
+        i = j
     return result
 
 
-def smooth_points(points, alpha=SMOOTHING_ALPHA):
+def exponential_smooth(points, alpha=SMOOTHING_ALPHA):
     if not points:
         return []
     smoothed = [points[0]]
-    for i in range(1, len(points)):
+    for pt in points[1:]:
         prev = smoothed[-1]
-        cur = points[i]
-        sx = alpha * float(cur[0]) + (1.0 - alpha) * float(prev[0])
-        sy = alpha * float(cur[1]) + (1.0 - alpha) * float(prev[1])
-        smoothed.append((sx, sy))
+        smoothed.append((
+            alpha * float(pt[0]) + (1.0 - alpha) * float(prev[0]),
+            alpha * float(pt[1]) + (1.0 - alpha) * float(prev[1]),
+        ))
     return smoothed
 
 
@@ -290,111 +315,118 @@ def dedupe_points(points, min_dist=6.0):
     return deduped
 
 
-def average_values(values):
-    values = [float(v) for v in values if v is not None]
-    if not values:
-        return None
-    return sum(values) / len(values)
+# ─── Barrel Identification ────────────────────────────────────────────────────
 
-
-def identify_barrels_simple(all_barrel_detections):
+def identify_barrels(all_barrel_detections, frame_width, frame_height):
     points = []
-    for frame_entry in all_barrel_detections:
-        for barrel in frame_entry["barrels"]:
+    for entry in all_barrel_detections:
+        for b in entry["barrels"]:
             points.append({
-                "x": float(barrel["center_x"]),
-                "y": float(barrel["center_y"]),
-                "confidence": float(barrel["confidence"]),
+                "x": float(b["center_x"]),
+                "y": float(b["center_y"]),
+                "confidence": float(b["confidence"]),
             })
 
     result = {"barrel1": None, "barrel2": None, "barrel3": None}
     geometry = {"top": None, "lower_left": None, "lower_right": None}
 
     if len(points) < 3:
-        return result, geometry
+        result, geometry = _estimate_barrel_positions(frame_width, frame_height)
+        return result, geometry, "geometry_estimated"
 
-    weighted_top_candidates = sorted(points, key=lambda p: (p["y"], -p["confidence"]))
-    top_candidates = weighted_top_candidates[: max(3, min(6, len(weighted_top_candidates)))]
+    sorted_by_y = sorted(points, key=lambda p: p["y"])
+    upper_cutoff = sorted_by_y[len(sorted_by_y) // 3]["y"]
+    top_candidates = [p for p in points if p["y"] <= upper_cutoff] or sorted_by_y[:3]
+
     top_x = average_values([p["x"] for p in top_candidates])
     top_y = average_values([p["y"] for p in top_candidates])
 
-    lower_candidates = [p for p in points if p["y"] > top_y + 18]
+    lower_candidates = [p for p in points if p["y"] > (top_y + 10)]
     if len(lower_candidates) < 2:
         lower_candidates = [p for p in points if p not in top_candidates]
     if len(lower_candidates) < 2:
-        return result, geometry
+        result, geometry = _estimate_barrel_positions(frame_width, frame_height)
+        return result, geometry, "partial_estimated"
 
     sorted_lower = sorted(lower_candidates, key=lambda p: p["x"])
-    split_index = max(1, len(sorted_lower) // 2)
-    left_group = sorted_lower[:split_index]
-    right_group = sorted_lower[split_index:]
+    split = max(1, len(sorted_lower) // 2)
+    left_group = sorted_lower[:split]
+    right_group = sorted_lower[split:]
 
     if not left_group or not right_group:
         median_x = average_values([p["x"] for p in sorted_lower])
         left_group = [p for p in sorted_lower if p["x"] <= median_x]
         right_group = [p for p in sorted_lower if p["x"] > median_x]
+
     if not left_group or not right_group:
-        return result, geometry
+        result, geometry = _estimate_barrel_positions(frame_width, frame_height)
+        return result, geometry, "geometry_estimated"
 
-    lower_left = {
-        "center_x": average_values([p["x"] for p in left_group]),
-        "center_y": average_values([p["y"] for p in left_group]),
-        "detection_count": len(left_group),
-        "average_confidence": average_values([p["confidence"] for p in left_group]),
-    }
-    lower_right = {
-        "center_x": average_values([p["x"] for p in right_group]),
-        "center_y": average_values([p["y"] for p in right_group]),
-        "detection_count": len(right_group),
-        "average_confidence": average_values([p["confidence"] for p in right_group]),
-    }
-    top_cluster = {
-        "center_x": top_x,
-        "center_y": top_y,
-        "detection_count": len(top_candidates),
-        "average_confidence": average_values([p["confidence"] for p in top_candidates]),
-    }
+    def cluster(group, role):
+        return {
+            "center_x": round(average_values([p["x"] for p in group]), 2),
+            "center_y": round(average_values([p["y"] for p in group]), 2),
+            "detection_count": len(group),
+            "average_confidence": round(average_values([p["confidence"] for p in group]), 3),
+            "geometry_role": role,
+        }
 
-    geometry["top"] = {"center_x": round(top_cluster["center_x"], 2), "center_y": round(top_cluster["center_y"], 2), "detection_count": int(top_cluster["detection_count"]), "average_confidence": round(top_cluster["average_confidence"], 3)}
-    geometry["lower_left"] = {"center_x": round(lower_left["center_x"], 2), "center_y": round(lower_left["center_y"], 2), "detection_count": int(lower_left["detection_count"]), "average_confidence": round(lower_left["average_confidence"], 3)}
-    geometry["lower_right"] = {"center_x": round(lower_right["center_x"], 2), "center_y": round(lower_right["center_y"], 2), "detection_count": int(lower_right["detection_count"]), "average_confidence": round(lower_right["average_confidence"], 3)}
+    lower_left = cluster(left_group, "lower_left")
+    lower_right = cluster(right_group, "lower_right")
+    top_cluster = cluster(top_candidates, "top")
+    top_cluster["center_x"] = round(top_x, 2)
+    top_cluster["center_y"] = round(top_y, 2)
 
-    result["barrel1"] = {"center_x": round(lower_left["center_x"], 2), "center_y": round(lower_left["center_y"], 2), "detection_count": int(lower_left["detection_count"]), "average_confidence": round(lower_left["average_confidence"], 3), "geometry_role": "lower_left"}
-    result["barrel2"] = {"center_x": round(lower_right["center_x"], 2), "center_y": round(lower_right["center_y"], 2), "detection_count": int(lower_right["detection_count"]), "average_confidence": round(lower_right["average_confidence"], 3), "geometry_role": "lower_right"}
-    result["barrel3"] = {"center_x": round(top_cluster["center_x"], 2), "center_y": round(top_cluster["center_y"], 2), "detection_count": int(top_cluster["detection_count"]), "average_confidence": round(top_cluster["average_confidence"], 3), "geometry_role": "top"}
+    geometry["top"] = top_cluster
+    geometry["lower_left"] = lower_left
+    geometry["lower_right"] = lower_right
 
+    result["barrel1"] = lower_left
+    result["barrel2"] = lower_right
+    result["barrel3"] = top_cluster
+
+    return result, geometry, "detected"
+
+
+def _estimate_barrel_positions(frame_width, frame_height):
+    w, h = float(frame_width), float(frame_height)
+    lower_left = {"center_x": round(w * 0.25, 2), "center_y": round(h * 0.68, 2), "detection_count": 0, "average_confidence": 0.0, "geometry_role": "lower_left"}
+    lower_right = {"center_x": round(w * 0.75, 2), "center_y": round(h * 0.68, 2), "detection_count": 0, "average_confidence": 0.0, "geometry_role": "lower_right"}
+    top = {"center_x": round(w * 0.50, 2), "center_y": round(h * 0.22, 2), "detection_count": 0, "average_confidence": 0.0, "geometry_role": "top"}
+    geometry = {"top": top, "lower_left": lower_left, "lower_right": lower_right}
+    result = {"barrel1": lower_left, "barrel2": lower_right, "barrel3": top}
     return result, geometry
 
+
+# ─── Frame Metrics ────────────────────────────────────────────────────────────
 
 def build_frame_metrics(sampled_frames, identified_barrels):
     metrics = []
     for frame in sampled_frames:
-        horse_detection = frame.get("horse_detection")
+        horse = frame.get("horse_detection")
         horse_center = None
         nearest_barrel = None
-        nearest_distance = None
+        nearest_dist = None
         dist_map = {"barrel1": None, "barrel2": None, "barrel3": None}
 
-        if horse_detection is not None:
-            horse_center = (float(horse_detection["tracking_point"][0]), float(horse_detection["tracking_point"][1]))
-            for barrel_name in ("barrel1", "barrel2", "barrel3"):
-                barrel_info = identified_barrels.get(barrel_name)
-                if barrel_info is None:
-                    continue
-                barrel_center = (float(barrel_info["center_x"]), float(barrel_info["center_y"]))
-                d = distance(horse_center, barrel_center)
-                dist_map[barrel_name] = d
+        if horse is not None:
+            horse_center = (float(horse["tracking_point"][0]), float(horse["tracking_point"][1]))
+            for name in ("barrel1", "barrel2", "barrel3"):
+                info = identified_barrels.get(name)
+                if info:
+                    d = distance(horse_center, (float(info["center_x"]), float(info["center_y"])))
+                    dist_map[name] = d
             available = [(k, v) for k, v in dist_map.items() if v is not None]
             if available:
-                nearest_barrel, nearest_distance = min(available, key=lambda item: item[1])
+                nearest_barrel, nearest_dist = min(available, key=lambda x: x[1])
 
         metrics.append({
             "frame_index": int(frame["frame_index"]),
             "timestamp_seconds": frame["timestamp_seconds"],
-            "horse_detected": horse_detection is not None,
-            "horse_center": round_point(horse_center, 2) if horse_center is not None else None,
+            "horse_detected": horse is not None,
+            "horse_center": round_point(horse_center, 2) if horse_center else None,
             "nearest_barrel": nearest_barrel,
-            "nearest_barrel_distance_px": round_or_none(nearest_distance, 2),
+            "nearest_barrel_distance_px": round_or_none(nearest_dist, 2),
             "dist_to_barrel1_px": round_or_none(dist_map["barrel1"], 2),
             "dist_to_barrel2_px": round_or_none(dist_map["barrel2"], 2),
             "dist_to_barrel3_px": round_or_none(dist_map["barrel3"], 2),
@@ -402,93 +434,84 @@ def build_frame_metrics(sampled_frames, identified_barrels):
     return metrics
 
 
-def detect_pattern_direction(frame_metrics):
-    lower_frames = []
-    for metric in frame_metrics:
-        if not metric["horse_detected"]:
-            continue
-        if metric["nearest_barrel"] in ("barrel1", "barrel2"):
-            lower_frames.append(metric)
+# ─── Pattern Direction ────────────────────────────────────────────────────────
 
+def detect_pattern_direction(frame_metrics):
+    lower_frames = [
+        m for m in frame_metrics
+        if m["horse_detected"] and m["nearest_barrel"] in ("barrel1", "barrel2")
+    ]
     if not lower_frames:
         return {
             "pattern_direction": "left",
             "actual_to_provisional_map": {"barrel1": "barrel1", "barrel2": "barrel2", "barrel3": "barrel3"},
-            "reason": "defaulted to left-first",
-            "confidence": 0.5,
-            "method": "fallback_left",
+            "reason": "defaulted — no early approach detected",
+            "confidence": 0.5, "method": "fallback_left",
         }
-
-    vote_window = lower_frames[: min(4, len(lower_frames))]
+    vote_window = lower_frames[:min(5, len(lower_frames))]
     left_votes = sum(1 for m in vote_window if m["nearest_barrel"] == "barrel1")
     right_votes = sum(1 for m in vote_window if m["nearest_barrel"] == "barrel2")
-
     if right_votes > left_votes:
         return {
             "pattern_direction": "right",
             "actual_to_provisional_map": {"barrel1": "barrel2", "barrel2": "barrel1", "barrel3": "barrel3"},
-            "reason": "early lower-barrel approach favored the right side",
-            "confidence": 0.78,
-            "method": "early_lower_votes",
+            "reason": "early approach favored right side",
+            "confidence": 0.80, "method": "early_lower_votes",
         }
-
     return {
         "pattern_direction": "left",
         "actual_to_provisional_map": {"barrel1": "barrel1", "barrel2": "barrel2", "barrel3": "barrel3"},
-        "reason": "early lower-barrel approach favored the left side",
-        "confidence": 0.78,
-        "method": "early_lower_votes",
+        "reason": "early approach favored left side",
+        "confidence": 0.80, "method": "early_lower_votes",
     }
 
 
-def invert_label_map(actual_to_provisional_map):
-    return {v: k for k, v in actual_to_provisional_map.items()}
-
-
 def remap_barrel_keyed_dict(provisional_dict, actual_to_provisional_map):
-    remapped = {}
-    for actual_label in ("barrel1", "barrel2", "barrel3"):
-        provisional_label = actual_to_provisional_map.get(actual_label)
-        remapped[actual_label] = provisional_dict.get(provisional_label) if provisional_label else None
-    return remapped
+    return {
+        actual: provisional_dict.get(actual_to_provisional_map.get(actual))
+        for actual in ("barrel1", "barrel2", "barrel3")
+    }
 
 
 def remap_frame_metric_labels(metrics, actual_to_provisional_map):
-    provisional_to_actual = invert_label_map(actual_to_provisional_map)
+    provisional_to_actual = {v: k for k, v in actual_to_provisional_map.items()}
     remapped = []
-    for metric in metrics:
-        new_metric = dict(metric)
-        new_metric["dist_to_barrel1_px"] = metric.get(f"dist_to_{actual_to_provisional_map['barrel1']}_px")
-        new_metric["dist_to_barrel2_px"] = metric.get(f"dist_to_{actual_to_provisional_map['barrel2']}_px")
-        new_metric["dist_to_barrel3_px"] = metric.get(f"dist_to_{actual_to_provisional_map['barrel3']}_px")
-        provisional_nearest = metric.get("nearest_barrel")
-        new_metric["nearest_barrel"] = (provisional_to_actual.get(provisional_nearest) if provisional_nearest is not None else None)
-        remapped.append(new_metric)
+    for m in metrics:
+        nm = dict(m)
+        nm["dist_to_barrel1_px"] = m.get(f"dist_to_{actual_to_provisional_map['barrel1']}_px")
+        nm["dist_to_barrel2_px"] = m.get(f"dist_to_{actual_to_provisional_map['barrel2']}_px")
+        nm["dist_to_barrel3_px"] = m.get(f"dist_to_{actual_to_provisional_map['barrel3']}_px")
+        prov = m.get("nearest_barrel")
+        nm["nearest_barrel"] = provisional_to_actual.get(prov) if prov else None
+        remapped.append(nm)
     return remapped
 
+
+# ─── Apex / Turn Detection ────────────────────────────────────────────────────
 
 def find_barrel_apex(barrel_name, frame_metrics, min_approach_frames=2):
     dist_key = f"dist_to_{barrel_name}_px"
     valid = [m for m in frame_metrics if m["horse_detected"] and m.get(dist_key) is not None]
     if len(valid) < min_approach_frames:
         return None
-    min_metric = min(valid, key=lambda m: m[dist_key])
-    min_idx = valid.index(min_metric)
-    if min_idx == 0:
-        if len(valid) > 1:
-            remaining = valid[1:]
-            min_metric = min(remaining, key=lambda m: m[dist_key])
-        else:
-            return None
+
+    # 3-frame smoothed minimum to reduce noise
+    distances = [m[dist_key] for m in valid]
+    smoothed = list(distances)
+    for i in range(1, len(smoothed) - 1):
+        smoothed[i] = (distances[i - 1] + distances[i] + distances[i + 1]) / 3.0
+
+    min_idx = smoothed.index(min(smoothed))
+    if min_idx == 0 and len(valid) > 1:
+        min_idx = smoothed[1:].index(min(smoothed[1:])) + 1
+
+    apex = valid[min_idx]
     return {
         "barrel_name": barrel_name,
-        "start_frame": int(min_metric["frame_index"]),
-        "apex_frame": int(min_metric["frame_index"]),
-        "end_frame": int(min_metric["frame_index"]),
-        "start_timestamp_seconds": min_metric["timestamp_seconds"],
-        "apex_timestamp_seconds": min_metric["timestamp_seconds"],
-        "end_timestamp_seconds": min_metric["timestamp_seconds"],
-        "min_distance_px": round_or_none(min_metric[dist_key], 2),
+        "apex_frame": int(apex["frame_index"]),
+        "apex_timestamp_seconds": apex["timestamp_seconds"],
+        "min_distance_px": round_or_none(apex[dist_key], 2),
+        "smoothed_min_distance_px": round_or_none(smoothed[min_idx], 2),
     }
 
 
@@ -500,103 +523,236 @@ def build_turns(frame_metrics):
     }
 
 
-def enforce_turn_order(turns, direction):
+def enforce_turn_order(turns):
     b1 = turns.get("barrel1")
     b2 = turns.get("barrel2")
     b3 = turns.get("barrel3")
+    fixed = dict(turns)
     t1 = b1["apex_timestamp_seconds"] if b1 else None
     t2 = b2["apex_timestamp_seconds"] if b2 else None
     t3 = b3["apex_timestamp_seconds"] if b3 else None
-    fixed = dict(turns)
-    if t1 is not None and t2 is not None and t2 <= t1:
+    if t1 and t2 and t2 <= t1:
         fixed["barrel2"] = None
-    if fixed.get("barrel2") is not None:
-        t2 = fixed["barrel2"]["apex_timestamp_seconds"]
-    if t2 is not None and t3 is not None and t3 <= t2:
+        t2 = None
+    if t2 and t3 and t3 <= t2:
+        fixed["barrel3"] = None
+    elif t1 and t3 and not t2 and t3 <= t1:
         fixed["barrel3"] = None
     return fixed
 
 
-def build_splits(turns, frame_metrics):
+# ─── Splits ───────────────────────────────────────────────────────────────────
+
+def build_splits(turns, frame_metrics, total_run_time_seconds=None):
+    """
+    Build splits anchored to the user's actual run time.
+
+    The video end is NOT the finish line — the user's entered time is our
+    only ground truth. Strategy:
+      1. Find barrel apex timestamps from video
+      2. Calculate barrel3-to-home as (total_time - t3_from_run_start)
+      3. If that doesn't make sense, proportionally scale everything
+      4. If no run time entered, return raw video timestamps (no home leg)
+
+    splits_method tells you which path fired:
+      anchored_to_run_time  — cleanest result
+      proportional_scaled   — timing needed adjustment
+      raw_video_timestamps  — no run time entered
+      partial_no_barrel3    — barrel3 not detected
+      no_data               — nothing to work with
+    """
     valid = [m for m in frame_metrics if m["horse_detected"] and m["timestamp_seconds"] is not None]
+
+    empty = {
+        "start_to_barrel1_seconds": None, "barrel1_to_barrel2_seconds": None,
+        "barrel2_to_barrel3_seconds": None, "barrel3_to_home_seconds": None,
+        "splits_method": "no_data",
+    }
     if not valid:
-        return {"start_to_barrel1_seconds": None, "barrel1_to_barrel2_seconds": None, "barrel2_to_barrel3_seconds": None, "barrel3_to_home_seconds": None}
+        return empty
 
     b1 = turns.get("barrel1")
     b2 = turns.get("barrel2")
     b3 = turns.get("barrel3")
-    start_time = valid[0]["timestamp_seconds"]
-    end_time = valid[-1]["timestamp_seconds"]
 
-    s1 = None
-    if b1 and b1["apex_timestamp_seconds"] is not None:
-        raw_s1 = b1["apex_timestamp_seconds"] - start_time
-        if raw_s1 >= 0.5:
-            s1 = raw_s1
+    video_start = valid[0]["timestamp_seconds"]
 
-    s2 = (b2["apex_timestamp_seconds"] - b1["apex_timestamp_seconds"] if b1 and b2 and b1["apex_timestamp_seconds"] is not None and b2["apex_timestamp_seconds"] is not None else None)
-    s3 = (b3["apex_timestamp_seconds"] - b2["apex_timestamp_seconds"] if b2 and b3 and b2["apex_timestamp_seconds"] is not None and b3["apex_timestamp_seconds"] is not None else None)
-    s4 = (end_time - b3["apex_timestamp_seconds"] if b3 and b3["apex_timestamp_seconds"] is not None else None)
+    t1 = (b1["apex_timestamp_seconds"] - video_start) if b1 else None
+    t2 = (b2["apex_timestamp_seconds"] - video_start) if b2 else None
+    t3 = (b3["apex_timestamp_seconds"] - video_start) if b3 else None
 
-    def safe_split(value):
-        if value is None:
+    def safe(v):
+        if v is None:
             return None
-        if value < 0 or value > 60:
+        if v < MIN_SPLIT_SECONDS or v > MAX_SPLIT_SECONDS:
             return None
-        return round_or_none(value, 3)
+        return round_or_none(v, 3)
 
+    if t3 is None:
+        return {
+            "start_to_barrel1_seconds": safe(t1),
+            "barrel1_to_barrel2_seconds": safe((t2 - t1) if t1 and t2 else None),
+            "barrel2_to_barrel3_seconds": None,
+            "barrel3_to_home_seconds": None,
+            "splits_method": "partial_no_barrel3",
+        }
+
+    has_valid_run_time = (
+        total_run_time_seconds is not None
+        and MIN_RUN_TIME <= total_run_time_seconds <= MAX_RUN_TIME
+    )
+
+    if has_valid_run_time:
+        total = total_run_time_seconds
+        t_home = total - t3
+
+        if 0.5 <= t_home <= 8.0:
+            # Best case — barrel3 timestamp + run time gives us the home leg directly
+            s1 = safe(t1)
+            s2 = safe((t2 - t1) if t1 and t2 else None)
+            s3 = safe((t3 - t2) if t2 else None)
+            s4 = safe(t_home)
+            known = [x for x in [s1, s2, s3, s4] if x is not None]
+            if known and abs(sum(known) - total) < total * 0.25:
+                return {
+                    "start_to_barrel1_seconds": s1,
+                    "barrel1_to_barrel2_seconds": s2,
+                    "barrel2_to_barrel3_seconds": s3,
+                    "barrel3_to_home_seconds": s4,
+                    "splits_method": "anchored_to_run_time",
+                }
+
+        # t_home out of range — proportionally scale using barrel3 as reference
+        # In barrel racing, barrel3 apex is typically ~78% through the run
+        if t3 > 0:
+            estimated_fraction_at_b3 = 0.78
+            scale = clamp((total * estimated_fraction_at_b3) / t3, 0.5, 2.5)
+            s1 = safe(t1 * scale if t1 else None)
+            s2 = safe((t2 - t1) * scale if t1 and t2 else None)
+            s3 = safe((t3 - t2) * scale if t2 else None)
+            accounted = sum(x for x in [s1, s2, s3] if x is not None)
+            s4 = safe(total - accounted)
+            if s4 is not None and s4 < 0.5:
+                s4 = 0.5
+            return {
+                "start_to_barrel1_seconds": s1,
+                "barrel1_to_barrel2_seconds": s2,
+                "barrel2_to_barrel3_seconds": s3,
+                "barrel3_to_home_seconds": s4,
+                "splits_method": "proportional_scaled",
+            }
+
+    # No run time — raw video timestamps, no home leg possible
     return {
-        "start_to_barrel1_seconds": safe_split(s1),
-        "barrel1_to_barrel2_seconds": safe_split(s2),
-        "barrel2_to_barrel3_seconds": safe_split(s3),
-        "barrel3_to_home_seconds": safe_split(s4),
+        "start_to_barrel1_seconds": safe(t1),
+        "barrel1_to_barrel2_seconds": safe((t2 - t1) if t1 and t2 else None),
+        "barrel2_to_barrel3_seconds": safe((t3 - t2) if t2 else None),
+        "barrel3_to_home_seconds": None,
+        "splits_method": "raw_video_timestamps",
     }
 
 
+# ─── Highlights & Insights ────────────────────────────────────────────────────
+
 def build_highlights(frame_metrics):
     barrel_distances = {"barrel1": [], "barrel2": [], "barrel3": []}
-    for metric in frame_metrics:
-        for barrel_name in ("barrel1", "barrel2", "barrel3"):
-            d = metric.get(f"dist_to_{barrel_name}_px")
+    for m in frame_metrics:
+        for name in ("barrel1", "barrel2", "barrel3"):
+            d = m.get(f"dist_to_{name}_px")
             if d is not None:
-                barrel_distances[barrel_name].append(float(d))
+                barrel_distances[name].append(float(d))
 
-    avg_distances = {k: (sum(v) / len(v) if v else None) for k, v in barrel_distances.items()}
+    avg_distances = {k: (sum(v) / len(v)) if v else None for k, v in barrel_distances.items()}
     available = [(k, v) for k, v in avg_distances.items() if v is not None]
-    best_barrel = None
-    if available:
-        best_barrel = min(available, key=lambda item: item[1])[0]
+    best_barrel = min(available, key=lambda x: x[1])[0] if available else None
+    weakest_barrel = max(available, key=lambda x: x[1])[0] if available else None
 
-    best_turn = best_barrel
-    focus_next = "Clean up the line and stay tighter around the weakest barrel."
-    if available:
-        weakest_barrel = max(available, key=lambda item: item[1])[0]
-        if weakest_barrel == "barrel1":
-            focus_next = "Cleaner entry to 1st barrel"
-        elif weakest_barrel == "barrel2":
-            focus_next = "Stay more efficient between the 1st and 2nd barrels."
-        elif weakest_barrel == "barrel3":
-            focus_next = "Carry a cleaner line into and out of the 3rd barrel."
+    label_map = {"barrel1": "1st", "barrel2": "2nd", "barrel3": "3rd"}
+    focus_map = {
+        "barrel1": "Work your approach angle and rate point to the first barrel",
+        "barrel2": "Stay tighter through the second barrel — focus on your pocket",
+        "barrel3": "Carry a cleaner line into and out of the third barrel",
+    }
+    return {
+        "best_barrel": label_map.get(best_barrel),
+        "best_turn": label_map.get(best_barrel),
+        "focus_next": focus_map.get(weakest_barrel, "Work on consistency across all three barrels"),
+        "weakest_barrel": label_map.get(weakest_barrel),
+    }
 
-    return {"best_barrel": best_barrel, "best_turn": best_turn, "focus_next": focus_next}
+
+def build_insights(tracking_quality, barrel_detection_summary, pattern_direction_info, splits, highlights):
+    insights = []
+    method = splits.get("splits_method", "")
+    detection_rate = tracking_quality.get("horse_detection_rate", 1.0)
+
+    if detection_rate < 0.5:
+        insights.append(
+            f"Horse detected in only {round(detection_rate * 100)}% of frames — "
+            "a wider camera angle or better lighting will improve path accuracy."
+        )
+    if barrel_detection_summary.get("detected_frame_count", 0) < 3:
+        insights.append(
+            "Barrel positions were hard to confirm. A wider shot keeping all three "
+            "barrels visible will improve accuracy."
+        )
+    if pattern_direction_info.get("method") == "fallback_left":
+        insights.append("Pattern direction could not be confirmed — defaulted to left-first.")
+
+    split_messages = {
+        "anchored_to_run_time": "Splits anchored to your entered run time — barrel3-to-home reflects actual finish distance.",
+        "proportional_scaled": "Splits proportionally scaled to match your entered run time.",
+        "raw_video_timestamps": "No run time entered — splits are raw video estimates. Enter your run time for better accuracy.",
+        "partial_no_barrel3": "Third barrel apex not detected — barrel3-to-home unavailable.",
+    }
+    if method in split_messages:
+        insights.append(split_messages[method])
+
+    if highlights.get("focus_next"):
+        insights.append(highlights["focus_next"])
+
+    return insights[:5]
 
 
 def summarize_barrel_detections(all_barrel_detections):
     centers = []
-    for frame_entry in all_barrel_detections:
-        for barrel in frame_entry["barrels"]:
-            centers.append({"center_x": barrel["center_x"], "center_y": barrel["center_y"], "confidence": barrel["confidence"], "frame_index": frame_entry["frame_index"]})
-
+    for entry in all_barrel_detections:
+        for b in entry["barrels"]:
+            centers.append({"center_x": b["center_x"], "center_y": b["center_y"], "confidence": b["confidence"], "frame_index": entry["frame_index"]})
     if not centers:
         return {"detected_frame_count": 0, "total_barrel_boxes": 0, "average_barrels_per_detected_frame": 0.0, "top_barrel_centers": []}
+    detected_frame_count = sum(1 for e in all_barrel_detections if e["barrels"])
+    total = len(centers)
+    top = sorted(centers, key=lambda c: c["confidence"], reverse=True)[:8]
+    return {
+        "detected_frame_count": detected_frame_count, "total_barrel_boxes": total,
+        "average_barrels_per_detected_frame": round(total / max(detected_frame_count, 1), 3),
+        "top_barrel_centers": top,
+    }
 
-    sorted_centers = sorted(centers, key=lambda c: c["confidence"], reverse=True)
-    top_centers = [{"center_x": c["center_x"], "center_y": c["center_y"], "confidence": c["confidence"], "frame_index": c["frame_index"]} for c in sorted_centers[:8]]
-    detected_frame_count = sum(1 for entry in all_barrel_detections if len(entry["barrels"]) > 0)
-    total_barrel_boxes = len(centers)
-    avg = total_barrel_boxes / detected_frame_count if detected_frame_count > 0 else 0.0
-    return {"detected_frame_count": detected_frame_count, "total_barrel_boxes": total_barrel_boxes, "average_barrels_per_detected_frame": round(avg, 3), "top_barrel_centers": top_centers}
 
+# ─── Overlay Drawing ──────────────────────────────────────────────────────────
+
+def draw_overlay(frame, horse_detection, barrel_detections, frame_index, timestamp_seconds):
+    overlay = frame.copy()
+    for b in (barrel_detections or []):
+        cv2.rectangle(overlay, (int(b["x1"]), int(b["y1"])), (int(b["x2"]), int(b["y2"])), (0, 255, 255), 2)
+        cv2.putText(overlay, f"barrel {b['confidence']:.2f}", (int(b["x1"]), max(20, int(b["y1"]) - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 2, cv2.LINE_AA)
+    if horse_detection:
+        x1, y1, x2, y2 = [int(v) for v in horse_detection["bbox"]]
+        cx, cy = [int(v) for v in horse_detection["tracking_point"]]
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
+        cv2.putText(overlay, f"horse {horse_detection['confidence']:.2f}", (x1, max(20, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(overlay, f"frame {frame_index}", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    if timestamp_seconds is not None:
+        cv2.putText(overlay, f"{timestamp_seconds:.2f}s", (16, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    return overlay
+
+
+# ─── Ideal Path ───────────────────────────────────────────────────────────────
 
 def build_left_first_ideal_waypoints():
     return [
@@ -616,264 +772,154 @@ def build_left_first_ideal_waypoints():
     ]
 
 
-def mirror_points_horiz(points):
-    return [(1.0 - float(x), float(y)) for x, y in points]
-
-
 def resample_polyline(points, num_samples=100):
-    if not points:
-        return []
-    if len(points) == 1:
-        return [points[0] for _ in range(num_samples)]
-    pts = list(points)
-    deduped = [pts[0]]
-    for pt in pts[1:]:
+    if not points or len(points) == 1:
+        return [points[0]] * num_samples if points else []
+    deduped = [points[0]]
+    for pt in points[1:]:
         if distance(pt, deduped[-1]) > 0.001:
             deduped.append(pt)
-    pts = deduped
-    if len(pts) == 1:
-        return [pts[0] for _ in range(num_samples)]
-
-    segment_lengths = []
+    if len(deduped) == 1:
+        return [deduped[0]] * num_samples
     cumulative = [0.0]
-    total = 0.0
-    for i in range(1, len(pts)):
-        seg_len = distance(pts[i - 1], pts[i])
-        segment_lengths.append(seg_len)
-        total += seg_len
-        cumulative.append(total)
-
+    for i in range(1, len(deduped)):
+        cumulative.append(cumulative[-1] + distance(deduped[i - 1], deduped[i]))
+    total = cumulative[-1]
     if total <= 1e-9:
-        return [pts[0] for _ in range(num_samples)]
-
+        return [deduped[0]] * num_samples
     samples = []
     for i in range(num_samples):
         target = (total * i) / max(num_samples - 1, 1)
-        seg_index = 0
-        while seg_index < len(segment_lengths) - 1 and cumulative[seg_index + 1] < target:
-            seg_index += 1
-        start_len = cumulative[seg_index]
-        end_len = cumulative[seg_index + 1]
-        p1 = pts[seg_index]
-        p2 = pts[seg_index + 1]
-        if end_len - start_len <= 1e-9:
-            samples.append((float(p1[0]), float(p1[1])))
-            continue
-        t = (target - start_len) / (end_len - start_len)
-        x = float(p1[0]) + t * (float(p2[0]) - float(p1[0]))
-        y = float(p1[1]) + t * (float(p2[1]) - float(p1[1]))
-        samples.append((x, y))
+        seg = 0
+        while seg < len(cumulative) - 2 and cumulative[seg + 1] < target:
+            seg += 1
+        seg_len = cumulative[seg + 1] - cumulative[seg]
+        t = ((target - cumulative[seg]) / seg_len) if seg_len > 1e-9 else 0.0
+        p1, p2 = deduped[seg], deduped[min(seg + 1, len(deduped) - 1)]
+        samples.append((
+            float(p1[0]) + t * (float(p2[0]) - float(p1[0])),
+            float(p1[1]) + t * (float(p2[1]) - float(p1[1])),
+        ))
     return samples
 
 
 def build_ideal_template_path(direction, num_samples=100):
     left_points = build_left_first_ideal_waypoints()
-    path = mirror_points_horiz(left_points) if direction == "right" else left_points
-    return resample_polyline(path, num_samples=num_samples)
+    if direction == "right":
+        left_points = [(1.0 - x, y) for x, y in left_points]
+    return resample_polyline(left_points, num_samples=num_samples)
 
 
-def get_closest_horse_point_to_barrel(frame_metrics, barrel_name, barrel_center_px, arena_diagonal):
+# ─── Warped Actual Path ───────────────────────────────────────────────────────
+
+def get_closest_horse_point_to_barrel(frame_metrics, barrel_name, arena_diagonal):
     dist_key = f"dist_to_{barrel_name}_px"
     radius = arena_diagonal * BARREL_NEAR_RADIUS_FRACTION
-    candidates = []
-    for metric in frame_metrics:
-        if not metric["horse_detected"] or metric["horse_center"] is None:
-            continue
-        dist = metric.get(dist_key)
-        if dist is not None and dist <= radius:
-            candidates.append({
-                "point": (float(metric["horse_center"][0]), float(metric["horse_center"][1])),
-                "dist": dist,
-            })
+    candidates = [
+        m for m in frame_metrics
+        if m["horse_detected"] and m["horse_center"] and m.get(dist_key) is not None and m[dist_key] <= radius
+    ]
     if not candidates:
         return None
-    best = min(candidates, key=lambda c: c["dist"])
-    return best["point"]
+    best = min(candidates, key=lambda m: m[dist_key])
+    return (float(best["horse_center"][0]), float(best["horse_center"][1]))
 
 
-def build_warped_actual_path(
-    frame_metrics,
-    identified_barrels,
-    barrel_geometry,
-    direction,
-    original_width,
-    original_height,
-):
-    if not identified_barrels or not barrel_geometry:
+def build_warped_actual_path(frame_metrics, identified_barrels, barrel_geometry, direction, original_width, original_height):
+    if not all([identified_barrels, barrel_geometry]):
         return []
-
     top = barrel_geometry.get("top")
     lower_left = barrel_geometry.get("lower_left")
     lower_right = barrel_geometry.get("lower_right")
-
-    if top is None or lower_left is None or lower_right is None:
+    if not all([top, lower_left, lower_right]):
         return []
-
-    arena_diagonal = math.hypot(original_width, original_height)
-
     b1 = identified_barrels.get("barrel1")
     b2 = identified_barrels.get("barrel2")
     b3 = identified_barrels.get("barrel3")
-
-    if not b1 or not b2 or not b3:
+    if not all([b1, b2, b3]):
         return []
 
-    b1_px = (float(b1["center_x"]), float(b1["center_y"]))
-    b2_px = (float(b2["center_x"]), float(b2["center_y"]))
-    b3_px = (float(b3["center_x"]), float(b3["center_y"]))
-
-    h1_px = get_closest_horse_point_to_barrel(frame_metrics, "barrel1", b1_px, arena_diagonal)
-    h2_px = get_closest_horse_point_to_barrel(frame_metrics, "barrel2", b2_px, arena_diagonal)
-    h3_px = get_closest_horse_point_to_barrel(frame_metrics, "barrel3", b3_px, arena_diagonal)
-
+    arena_diagonal = math.hypot(original_width, original_height)
     left_x = float(lower_left["center_x"])
     right_x = float(lower_right["center_x"])
     top_y = float(top["center_y"])
+    home_y_px = top_y + (original_height - top_y) * 0.85
 
     if abs(right_x - left_x) < 1.0:
         return []
 
-    home_y_px = top_y + (original_height - top_y) * 0.85
-
     def px_to_norm(px_point):
         x, y = px_point
-        nx = CANONICAL_LEFT_BARREL_X + (
-            (float(x) - left_x) / (right_x - left_x)
-        ) * (CANONICAL_RIGHT_BARREL_X - CANONICAL_LEFT_BARREL_X)
-        ny = CANONICAL_TOP_BARREL_Y + (
-            (float(y) - top_y) / max(home_y_px - top_y, 1e-9)
-        ) * (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y)
+        nx = CANONICAL_LEFT_BARREL_X + ((float(x) - left_x) / (right_x - left_x)) * (CANONICAL_RIGHT_BARREL_X - CANONICAL_LEFT_BARREL_X)
+        ny = CANONICAL_TOP_BARREL_Y + ((float(y) - top_y) / max(home_y_px - top_y, 1e-9)) * (CANONICAL_HOME_Y - CANONICAL_TOP_BARREL_Y)
         return (clamp(float(nx), 0.02, 0.98), clamp(float(ny), 0.02, 0.98))
 
     ideal_path = build_ideal_template_path(direction, num_samples=80)
-
-    h1_norm = px_to_norm(h1_px) if h1_px else None
-    h2_norm = px_to_norm(h2_px) if h2_px else None
-    h3_norm = px_to_norm(h3_px) if h3_px else None
-
-    if direction == "right":
-        ideal_b1_norm = (0.78, 0.50)
-        ideal_b2_norm = (0.22, 0.50)
-        ideal_b3_norm = (0.50, 0.17)
-    else:
-        ideal_b1_norm = (0.22, 0.50)
-        ideal_b2_norm = (0.78, 0.50)
-        ideal_b3_norm = (0.50, 0.17)
+    ideal_norms = {
+        "barrel1": (0.78, 0.50) if direction == "right" else (0.22, 0.50),
+        "barrel2": (0.22, 0.50) if direction == "right" else (0.78, 0.50),
+        "barrel3": (0.50, 0.17),
+    }
 
     offsets = {}
-
-    if h1_norm:
-        offsets["barrel1"] = (h1_norm[0] - ideal_b1_norm[0], h1_norm[1] - ideal_b1_norm[1])
-    else:
-        offsets["barrel1"] = (0.0, 0.0)
-
-    if h2_norm:
-        offsets["barrel2"] = (h2_norm[0] - ideal_b2_norm[0], h2_norm[1] - ideal_b2_norm[1])
-    else:
-        offsets["barrel2"] = (0.0, 0.0)
-
-    if h3_norm:
-        offsets["barrel3"] = (h3_norm[0] - ideal_b3_norm[0], h3_norm[1] - ideal_b3_norm[1])
-    else:
-        offsets["barrel3"] = (0.0, 0.0)
+    for name in ("barrel1", "barrel2", "barrel3"):
+        horse_px = get_closest_horse_point_to_barrel(frame_metrics, name, arena_diagonal)
+        if horse_px:
+            hn = px_to_norm(horse_px)
+            offsets[name] = (hn[0] - ideal_norms[name][0], hn[1] - ideal_norms[name][1])
+        else:
+            offsets[name] = (0.0, 0.0)
 
     WARP_RADIUS = 0.25
     MAX_WARP = 0.20
-
-    def warp_influence(point, barrel_norm, radius):
-        d = distance(point, barrel_norm)
-        if d >= radius:
-            return 0.0
-        return 1.0 - (d / radius)
-
-    warped_path = []
+    warped = []
     for pt in ideal_path:
         x, y = float(pt[0]), float(pt[1])
-        total_offset_x = 0.0
-        total_offset_y = 0.0
-
-        for barrel_name, barrel_norm in [
-            ("barrel1", ideal_b1_norm),
-            ("barrel2", ideal_b2_norm),
-            ("barrel3", ideal_b3_norm),
-        ]:
-            influence = warp_influence((x, y), barrel_norm, WARP_RADIUS)
+        ox, oy = 0.0, 0.0
+        for name, ideal_n in ideal_norms.items():
+            d = distance((x, y), ideal_n)
+            influence = max(0.0, 1.0 - (d / WARP_RADIUS)) if d < WARP_RADIUS else 0.0
             if influence > 0:
-                ox, oy = offsets[barrel_name]
-                total_offset_x += influence * ox
-                total_offset_y += influence * oy
-
-        total_offset_x = clamp(total_offset_x, -MAX_WARP, MAX_WARP)
-        total_offset_y = clamp(total_offset_y, -MAX_WARP, MAX_WARP)
-        x += total_offset_x
-        y += total_offset_y
-
-        warped_path.append([
-            round(clamp(x, 0.02, 0.98), 4),
-            round(clamp(y, 0.02, 0.98), 4),
+                ox += influence * offsets[name][0]
+                oy += influence * offsets[name][1]
+        warped.append([
+            round(clamp(x + clamp(ox, -MAX_WARP, MAX_WARP), 0.02, 0.98), 4),
+            round(clamp(y + clamp(oy, -MAX_WARP, MAX_WARP), 0.02, 0.98), 4),
         ])
-
-    return warped_path
-
-
-def draw_overlay(frame, horse_detection, barrel_detections, identified_barrels, frame_index, timestamp_seconds):
-    overlay = frame.copy()
-    for barrel in barrel_detections or []:
-        x1 = int(barrel["x1"])
-        y1 = int(barrel["y1"])
-        x2 = int(barrel["x2"])
-        y2 = int(barrel["y2"])
-        conf = barrel.get("confidence")
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
-        cv2.putText(overlay, f"barrel {conf}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 2, cv2.LINE_AA)
-    if horse_detection:
-        x1, y1, x2, y2 = [int(v) for v in horse_detection["bbox"]]
-        cx, cy = [int(v) for v in horse_detection["tracking_point"]]
-        conf = horse_detection.get("confidence")
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
-        cv2.putText(overlay, f"horse {conf}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
-    cv2.putText(overlay, f"frame {frame_index}", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-    if timestamp_seconds is not None:
-        cv2.putText(overlay, f"time {timestamp_seconds}s", (16, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-    return overlay
+    return warped
 
 
-def save_path_map(width, height, smoothed_points, out_path, identified_barrels=None):
-    canvas_width = min(width, 960)
-    canvas_height = min(height, 540)
-    scale_x = canvas_width / float(max(width, 1))
-    scale_y = canvas_height / float(max(height, 1))
-    canvas = 255 * (cv2.UMat(canvas_height, canvas_width, cv2.CV_8UC3).get() * 0 + 1)
-    for i in range(1, len(smoothed_points)):
-        p1 = (int(smoothed_points[i - 1][0] * scale_x), int(smoothed_points[i - 1][1] * scale_y))
-        p2 = (int(smoothed_points[i][0] * scale_x), int(smoothed_points[i][1] * scale_y))
-        cv2.line(canvas, p1, p2, (255, 0, 0), 3)
-    if identified_barrels:
-        for barrel_name, barrel_info in identified_barrels.items():
-            if barrel_info is None:
-                continue
-            x = int(barrel_info["center_x"] * scale_x)
-            y = int(barrel_info["center_y"] * scale_y)
-            cv2.circle(canvas, (x, y), 12, (0, 255, 255), 2)
-            cv2.putText(canvas, barrel_name.upper(), (x + 8, max(20, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 120, 255), 2, cv2.LINE_AA)
-    safe_imwrite(out_path, canvas)
-
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     video_path = sys.argv[1] if len(sys.argv) > 1 else None
+    run_json_str = sys.argv[2] if len(sys.argv) > 2 else "{}"
+
     if not video_path:
-        fail("No video path was provided.")
+        fail("No video path provided.")
         return
     if not os.path.exists(video_path):
         fail("Video file does not exist.", {"video_path": video_path})
         return
     if not os.path.exists(BARREL_MODEL_PATH):
-        fail("Barrel model file does not exist.", {"barrel_model_path": BARREL_MODEL_PATH})
+        fail("Barrel model not found.", {"barrel_model_path": BARREL_MODEL_PATH})
         return
     if not os.path.exists(HORSE_MODEL_PATH):
-        fail("Horse model file does not exist.", {"horse_model_path": HORSE_MODEL_PATH})
+        fail("Horse model not found.", {"horse_model_path": HORSE_MODEL_PATH})
         return
+
+    try:
+        run_data = json.loads(run_json_str) if run_json_str else {}
+    except Exception:
+        run_data = {}
+
+    total_run_time_seconds = None
+    try:
+        t = float(run_data.get("time", 0) or 0)
+        if MIN_RUN_TIME <= t <= MAX_RUN_TIME:
+            total_run_time_seconds = t
+    except Exception:
+        pass
 
     output_dir = f"{video_path}_frames"
     os.makedirs(output_dir, exist_ok=True)
@@ -882,13 +928,13 @@ def main():
         log_err("Loading models...")
         barrel_model = load_model(BARREL_MODEL_PATH)
         horse_model = load_model(HORSE_MODEL_PATH)
-    except Exception as model_error:
-        fail("Failed to load YOLO model.", {"details": str(model_error)})
+    except Exception as e:
+        fail("Failed to load YOLO model.", {"details": str(e)})
         return
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        fail("OpenCV could not open the video.", {"video_path": video_path})
+        fail("Could not open video.", {"video_path": video_path})
         return
 
     try:
@@ -899,177 +945,201 @@ def main():
         duration = (frame_count / fps) if fps > 0 else 0.0
 
         if frame_count <= 0 or original_width <= 0 or original_height <= 0:
-            fail("Video metadata could not be read correctly.", {"video_path": video_path, "frame_count": frame_count, "fps": fps, "width": original_width, "height": original_height})
+            fail("Video metadata unreadable.", {"frame_count": frame_count, "fps": fps, "width": original_width, "height": original_height})
             return
 
-        log_err(f"Video opened. frame_count={frame_count}, fps={round(fps, 3)}, width={original_width}, height={original_height}, duration={round(duration, 3)}")
+        log_err(f"Video: frames={frame_count}, fps={round(fps,2)}, {original_width}x{original_height}, duration={round(duration,2)}s")
+        if total_run_time_seconds:
+            log_err(f"Run time from user: {total_run_time_seconds}s")
 
-        sample_indices = build_sample_frame_indices(frame_count, fps)
         max_jump = adaptive_max_jump(original_width, original_height)
+        base_indices = build_base_sample_indices(frame_count, fps)
+        log_err(f"Base samples: {len(base_indices)}")
 
+        # ── State ─────────────────────────────────────────────────────────────
         sampled_frames = []
         all_barrel_detections = []
         horse_detected_count = 0
         read_success_count = 0
         rejected_jump_count = 0
-        missed_detection_count = 0
         raw_trajectory_points = []
         accepted_points = []
-        track_points = []
         previous_accepted_point = None
 
-        for idx, target_frame in enumerate(sample_indices):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-            ret, frame = cap.read()
-
+        # ── Pass 1: Base sampling ─────────────────────────────────────────────
+        for idx, target_frame in enumerate(base_indices):
+            frame = read_frame_at(cap, target_frame)
             image_path = None
             overlay_image_path = None
             horse_detection = None
-            rejection_reason = None
             barrel_detections = []
-
+            chosen_point = None
+            rejection_reason = None
             percent = (target_frame / max(frame_count - 1, 1)) if frame_count > 1 else 0.0
             timestamp_seconds = round(target_frame / fps, 3) if fps > 0 else None
-            chosen_point_for_track = None
 
-            if ret and frame is not None:
+            if frame is not None:
                 read_success_count += 1
-                inference_frame, x_ratio, y_ratio = resize_for_inference(frame)
+                inf_frame, xr, yr = resize_for_inference(frame)
 
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    horse_results = horse_model.predict(source=inference_frame, conf=HORSE_CONFIDENCE_THRESHOLD, classes=[HORSE_CLASS_ID], verbose=False)
+                    horse_results = horse_model.predict(source=inf_frame, conf=HORSE_CONFIDENCE_THRESHOLD, classes=[HORSE_CLASS_ID], verbose=False)
 
-                candidates = []
-                if horse_results and len(horse_results) > 0:
-                    candidates = build_horse_candidates(horse_results[0], x_ratio=x_ratio, y_ratio=y_ratio)
-
-                best_candidate = choose_best_horse_candidate(candidates, previous_accepted_point, original_width, original_height)
+                candidates = detect_horse_candidates(horse_results[0], xr, yr) if horse_results else []
+                best = choose_best_horse(candidates, previous_accepted_point, original_width, original_height)
 
                 if idx % 2 == 0:
-                    barrel_detections_resized = detect_barrels_in_frame(inference_frame, barrel_model, confidence_threshold=BARREL_CONFIDENCE_THRESHOLD)
-                    barrel_detections = scale_barrels_to_original(barrel_detections_resized, x_ratio, y_ratio)
+                    barrel_detections = detect_barrels(inf_frame, barrel_model, xr, yr)
 
                 all_barrel_detections.append({"frame_index": int(target_frame), "timestamp_seconds": timestamp_seconds, "barrels": barrel_detections})
 
-                if best_candidate is not None:
+                if best is not None:
                     horse_detected_count += 1
-                    horse_detection = {
-                        "confidence": best_candidate["confidence"],
-                        "bbox": best_candidate["bbox"],
-                        "center": best_candidate["center"],
-                        "tracking_point": round_point(best_candidate["tracking_point"], 2),
-                    }
-                    current_point = best_candidate["tracking_point"]
+                    horse_detection = {"confidence": best["confidence"], "bbox": best["bbox"], "center": best["center"], "tracking_point": round_point(best["tracking_point"], 2)}
+                    current_point = best["tracking_point"]
                     raw_trajectory_points.append(current_point)
-
-                    if previous_accepted_point is None:
+                    jump = distance(previous_accepted_point, current_point) if previous_accepted_point else 0
+                    if previous_accepted_point is None or jump <= max_jump * 1.12:
                         accepted_points.append(current_point)
-                        chosen_point_for_track = current_point
+                        chosen_point = current_point
                         previous_accepted_point = current_point
                     else:
-                        jump_distance = distance(previous_accepted_point, current_point)
-                        if jump_distance <= max_jump:
-                            accepted_points.append(current_point)
-                            chosen_point_for_track = current_point
-                            previous_accepted_point = current_point
-                        elif jump_distance <= max_jump * 1.10:
-                            accepted_points.append(current_point)
-                            chosen_point_for_track = current_point
-                            previous_accepted_point = current_point
-                        else:
-                            rejected_jump_count += 1
-                            rejection_reason = f"jump_rejected_{round(jump_distance, 2)}px"
-                else:
-                    missed_detection_count += 1
+                        rejected_jump_count += 1
+                        rejection_reason = f"jump_rejected_{round(jump,1)}px"
 
                 frame_file = os.path.join(output_dir, f"frame_{idx:03d}.jpg")
-                if safe_imwrite(frame_file, frame) and os.path.exists(frame_file):
+                if safe_imwrite(frame_file, frame):
                     image_path = frame_file
-
-                overlay = draw_overlay(frame, horse_detection, barrel_detections, None, int(target_frame), timestamp_seconds)
+                overlay = draw_overlay(frame, horse_detection, barrel_detections, int(target_frame), timestamp_seconds)
                 overlay_file = os.path.join(output_dir, f"frame_{idx:03d}_overlay.jpg")
-                if safe_imwrite(overlay_file, overlay) and os.path.exists(overlay_file):
+                if safe_imwrite(overlay_file, overlay):
                     overlay_image_path = overlay_file
 
-            track_points.append(chosen_point_for_track)
             sampled_frames.append({
-                "percent": round(percent, 4),
-                "frame_index": int(target_frame),
-                "timestamp_seconds": timestamp_seconds,
-                "read_success": bool(ret and frame is not None),
-                "image_path": image_path,
-                "overlay_image_path": overlay_image_path,
-                "horse_detection": horse_detection,
-                "barrel_detections": barrel_detections,
-                "barrel_detection_count": len(barrel_detections),
-                "rejection_reason": rejection_reason,
+                "percent": round(percent, 4), "frame_index": int(target_frame),
+                "timestamp_seconds": timestamp_seconds, "read_success": frame is not None,
+                "image_path": image_path, "overlay_image_path": overlay_image_path,
+                "horse_detection": horse_detection, "barrel_detections": barrel_detections,
+                "barrel_detection_count": len(barrel_detections), "rejection_reason": rejection_reason,
             })
 
-        interpolated_track = interpolate_small_gaps(track_points, max_gap=INTERPOLATION_MAX_GAP)
-        smoothed_points = [p for p in interpolated_track if p is not None]
-        smoothed_points = smooth_points(smoothed_points, alpha=SMOOTHING_ALPHA)
+        # ── Preliminary identification for dense pass ─────────────────────────
+        prov_barrels, prov_geometry, _ = identify_barrels(all_barrel_detections, original_width, original_height)
+        prov_metrics = build_frame_metrics(sampled_frames, prov_barrels)
+        direction_info = detect_pattern_direction(prov_metrics)
+        a2p = direction_info["actual_to_provisional_map"]
+
+        prov_barrels_remapped = remap_barrel_keyed_dict(prov_barrels, a2p)
+        prov_metrics_remapped = remap_frame_metric_labels(prov_metrics, a2p)
+        prov_turns = enforce_turn_order(build_turns(prov_metrics_remapped))
+
+        apex_timestamps = [
+            t["apex_timestamp_seconds"]
+            for t in prov_turns.values()
+            if t and t.get("apex_timestamp_seconds")
+        ]
+
+        # ── Pass 2: Dense sampling around apexes ──────────────────────────────
+        if apex_timestamps:
+            dense_indices = build_dense_indices_around_apexes(apex_timestamps, fps, frame_count, base_indices)
+            new_indices = sorted(set(dense_indices) - set(base_indices))
+            log_err(f"Dense pass: +{len(new_indices)} frames around apex zones")
+
+            for target_frame in new_indices:
+                frame = read_frame_at(cap, target_frame)
+                timestamp_seconds = round(target_frame / fps, 3) if fps > 0 else None
+                percent = (target_frame / max(frame_count - 1, 1)) if frame_count > 1 else 0.0
+                horse_detection = None
+                barrel_detections = []
+                chosen_point = None
+                image_path = None
+                overlay_image_path = None
+
+                if frame is not None:
+                    read_success_count += 1
+                    inf_frame, xr, yr = resize_for_inference(frame)
+
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        horse_results = horse_model.predict(source=inf_frame, conf=HORSE_CONFIDENCE_THRESHOLD, classes=[HORSE_CLASS_ID], verbose=False)
+
+                    candidates = detect_horse_candidates(horse_results[0], xr, yr) if horse_results else []
+                    best = choose_best_horse(candidates, previous_accepted_point, original_width, original_height)
+                    barrel_detections = detect_barrels(inf_frame, barrel_model, xr, yr)
+
+                    all_barrel_detections.append({"frame_index": int(target_frame), "timestamp_seconds": timestamp_seconds, "barrels": barrel_detections})
+
+                    if best is not None:
+                        horse_detected_count += 1
+                        horse_detection = {"confidence": best["confidence"], "bbox": best["bbox"], "center": best["center"], "tracking_point": round_point(best["tracking_point"], 2)}
+                        current_point = best["tracking_point"]
+                        jump = distance(previous_accepted_point, current_point) if previous_accepted_point else 0
+                        if previous_accepted_point is None or jump <= max_jump * 1.12:
+                            accepted_points.append(current_point)
+                            chosen_point = current_point
+                            previous_accepted_point = current_point
+
+                    frame_file = os.path.join(output_dir, f"frame_dense_{target_frame:06d}.jpg")
+                    if safe_imwrite(frame_file, frame):
+                        image_path = frame_file
+                    overlay = draw_overlay(frame, horse_detection, barrel_detections, int(target_frame), timestamp_seconds)
+                    overlay_file = os.path.join(output_dir, f"frame_dense_{target_frame:06d}_overlay.jpg")
+                    if safe_imwrite(overlay_file, overlay):
+                        overlay_image_path = overlay_file
+
+                sampled_frames.append({
+                    "percent": round(percent, 4), "frame_index": int(target_frame),
+                    "timestamp_seconds": timestamp_seconds, "read_success": frame is not None,
+                    "image_path": image_path, "overlay_image_path": overlay_image_path,
+                    "horse_detection": horse_detection, "barrel_detections": barrel_detections,
+                    "barrel_detection_count": len(barrel_detections), "rejection_reason": None, "dense_pass": True,
+                })
+
+            sampled_frames.sort(key=lambda f: f["frame_index"])
+            all_barrel_detections.sort(key=lambda e: e["frame_index"])
+
+        # ── Final pass with all data ───────────────────────────────────────────
+        final_barrels, final_geometry, barrel_id_method = identify_barrels(all_barrel_detections, original_width, original_height)
+        final_barrels = remap_barrel_keyed_dict(final_barrels, a2p)
+        final_metrics = remap_frame_metric_labels(build_frame_metrics(sampled_frames, final_barrels), a2p)
+        final_turns = enforce_turn_order(build_turns(final_metrics))
+        splits = build_splits(final_turns, final_metrics, total_run_time_seconds)
+        highlights = build_highlights(final_metrics)
+
+        # ── Trajectory ────────────────────────────────────────────────────────
+        all_track_points = [
+            tuple(f["horse_detection"]["tracking_point"]) if f.get("horse_detection") else None
+            for f in sampled_frames
+        ]
+        interpolated = interpolate_gaps(all_track_points, INTERPOLATION_MAX_GAP)
+        smoothed_points = exponential_smooth([p for p in interpolated if p is not None], SMOOTHING_ALPHA)
         smoothed_points = dedupe_points(smoothed_points, min_dist=6.0)
 
-        barrel_detection_summary = summarize_barrel_detections(all_barrel_detections)
-        provisional_identified_barrels, barrel_geometry = identify_barrels_simple(all_barrel_detections)
-        provisional_frame_metrics = build_frame_metrics(sampled_frames, provisional_identified_barrels)
-        pattern_direction_info = detect_pattern_direction(provisional_frame_metrics)
-        actual_to_provisional_map = pattern_direction_info["actual_to_provisional_map"]
-
-        identified_barrels = remap_barrel_keyed_dict(provisional_identified_barrels, actual_to_provisional_map)
-        frame_metrics = remap_frame_metric_labels(provisional_frame_metrics, actual_to_provisional_map)
-
-        turns = build_turns(frame_metrics)
-        turns = enforce_turn_order(turns, pattern_direction_info["pattern_direction"])
-        splits = build_splits(turns, frame_metrics)
-        highlights = build_highlights(frame_metrics)
-
-        direction = pattern_direction_info.get("pattern_direction") or "left"
+        # ── Paths ─────────────────────────────────────────────────────────────
+        direction = direction_info.get("pattern_direction", "left")
         ideal_template_path = build_ideal_template_path(direction, num_samples=80)
-
-        warped_actual_path = build_warped_actual_path(
-            frame_metrics,
-            identified_barrels,
-            barrel_geometry,
-            direction,
-            original_width,
-            original_height,
-        )
-
+        warped_actual_path = build_warped_actual_path(final_metrics, final_barrels, final_geometry, direction, original_width, original_height)
         if not warped_actual_path:
             warped_actual_path = [[round(p[0], 4), round(p[1], 4)] for p in ideal_template_path]
 
-        path_map_path = None
-        if len(smoothed_points) > 2:
-            path_map_path = f"{video_path}_path_map.jpg"
-            save_path_map(original_width, original_height, smoothed_points, path_map_path, identified_barrels=identified_barrels)
-
+        # ── Quality summary ───────────────────────────────────────────────────
+        total_sampled = len(sampled_frames)
         tracking_quality = {
-            "sampled_frame_count": len(sample_indices),
+            "sampled_frame_count": total_sampled,
             "read_success_count": read_success_count,
             "horse_detected_count": horse_detected_count,
-            "missed_detection_count": missed_detection_count,
             "rejected_jump_count": rejected_jump_count,
             "max_jump_threshold_px": round(float(max_jump), 2),
-            "read_success_rate": round(read_success_count / max(len(sample_indices), 1), 4),
+            "read_success_rate": round(read_success_count / max(total_sampled, 1), 4),
             "horse_detection_rate": round(horse_detected_count / max(read_success_count, 1), 4),
-            "accepted_point_rate": round(len(accepted_points) / max(horse_detected_count, 1), 4),
-            "interpolated_path_point_count": len(smoothed_points),
+            "barrel_id_method": barrel_id_method,
+            "dense_pass_used": bool(apex_timestamps),
         }
 
-        insights = []
-        if horse_detected_count < max(5, len(sample_indices) // 2):
-            insights.append("Horse detection was somewhat limited, so path confidence is reduced.")
-        if barrel_detection_summary["detected_frame_count"] < 2:
-            insights.append("Barrel detections were limited, so barrel placement confidence is reduced.")
-        if pattern_direction_info["method"] == "fallback_left":
-            insights.append("Pattern direction was estimated conservatively because the first approach was not strongly confirmed.")
-        if highlights["focus_next"]:
-            insights.append(highlights["focus_next"])
+        barrel_detection_summary = summarize_barrel_detections(all_barrel_detections)
+        insights = build_insights(tracking_quality, barrel_detection_summary, direction_info, splits, highlights)
 
-        smoothed_path_points = [round_point(pt, 2) for pt in smoothed_points]
-
-        output = {
+        # ── Output ────────────────────────────────────────────────────────────
+        emit_json({
             "ok": True,
             "message": "Barrel path analysis completed.",
             "video_path": video_path,
@@ -1082,40 +1152,35 @@ def main():
             "raw_trajectory_point_count": len(raw_trajectory_points),
             "accepted_trajectory_point_count": len(accepted_points),
             "smoothed_trajectory_point_count": len(smoothed_points),
-            "smoothed_path_points": smoothed_path_points,
+            "smoothed_path_points": [round_point(p, 2) for p in smoothed_points],
             "normalized_smoothed_path_points": warped_actual_path,
-            "path_map_path": path_map_path,
+            "path_map_path": None,
             "tracking_quality": tracking_quality,
             "barrel_detection_summary": barrel_detection_summary,
-            "barrel_geometry": barrel_geometry,
+            "barrel_geometry": final_geometry,
             "pattern_direction": direction,
-            "pattern_direction_info": pattern_direction_info,
-            "identified_barrels": identified_barrels,
-            "turns": turns,
+            "pattern_direction_info": direction_info,
+            "identified_barrels": final_barrels,
+            "turns": final_turns,
             "splits": splits,
             "barrel_metrics": {"barrel1": None, "barrel2": None, "barrel3": None},
-            "normalized_actual_path_transform": None,
             "normalized_actual_template_path": warped_actual_path,
             "ideal_template_path": [[round(p[0], 4), round(p[1], 4)] for p in ideal_template_path],
             "template_path_comparison": None,
             "speed_scores": {"barrel1": None, "barrel2": None, "barrel3": None},
             "highlights": highlights,
-            "frame_metrics": frame_metrics,
+            "frame_metrics": final_metrics,
             "motion_samples": [],
             "sampled_frames": sampled_frames,
-            "insights": insights[:4],
-        }
+            "insights": insights,
+        })
 
-        emit_json(output)
-
-    except Exception as runtime_error:
-        log_err("Python analysis crashed:", str(runtime_error))
+    except Exception as e:
+        log_err("Python analysis crashed:", str(e))
         log_err(traceback.format_exc())
         emit_json({
-            "ok": False,
-            "error": "Python analysis crashed",
-            "details": str(runtime_error),
-            "traceback": traceback.format_exc(),
+            "ok": False, "error": "Python analysis crashed",
+            "details": str(e), "traceback": traceback.format_exc(),
             "video_path": video_path,
         })
     finally:
