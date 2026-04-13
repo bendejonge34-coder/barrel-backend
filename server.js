@@ -1,12 +1,13 @@
-import express from "express";
-import multer from "multer";
-import cors from "cors";
-import fs from "fs";
-import path from "path";
 import { execFile } from "child_process";
-import { promisify } from "util";
-import OpenAI from "openai";
+import cors from "cors";
 import dotenv from "dotenv";
+import express from "express";
+import fs from "fs";
+import multer from "multer";
+import OpenAI from "openai";
+import path from "path";
+import { Resend } from "resend";
+import { promisify } from "util";
 
 dotenv.config();
 
@@ -15,9 +16,9 @@ const execFileAsync = promisify(execFile);
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.PORT || 3001);
-const EXEC_MAX_BUFFER = 1024 * 1024 * 50;         // 50MB stdout buffer
-const PYTHON_TIMEOUT_MS = 1000 * 60 * 8;           // 8 min python timeout
-const JOB_TTL_MS = 1000 * 60 * 60;                 // Jobs expire after 1 hour
+const EXEC_MAX_BUFFER = 1024 * 1024 * 50;
+const PYTHON_TIMEOUT_MS = 1000 * 60 * 8;
+const JOB_TTL_MS = 1000 * 60 * 60;
 const POLL_INTERVAL_MS = 2000;
 
 const pythonExePath =
@@ -41,6 +42,10 @@ console.log("========================");
 // ─── OpenAI ───────────────────────────────────────────────────────────────────
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ─── Resend ───────────────────────────────────────────────────────────────────
+
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ─── Express Setup ────────────────────────────────────────────────────────────
 
@@ -235,7 +240,6 @@ function restoreJobs() {
       if (!job?.id || !job?.createdAt) continue;
       if (Date.now() - new Date(job.createdAt).getTime() >= JOB_TTL_MS) continue;
 
-      // Jobs that were mid-flight when the server died are marked failed
       const restoredJob = { ...job };
       if (restoredJob.status === "queued" || restoredJob.status === "running") {
         restoredJob.status = "failed";
@@ -284,7 +288,6 @@ async function runPythonAnalysis(videoPath, run = {}) {
 
     return result;
   } catch (err) {
-    // Try to recover JSON from failed process output
     if (err?.stdout) {
       const recovered = safeParseJson(err.stdout) || extractLastJsonObject(err.stdout);
       if (recovered?.ok) return recovered;
@@ -566,7 +569,6 @@ async function processVideoJob(jobId) {
   try {
     updateJob(jobId, { status: "running", progress: 5, stage: "Starting analysis", startedAt: new Date().toISOString() });
 
-    // ── Python computer vision ─────────────────────────────────────────────
     updateJob(jobId, { progress: 10, stage: "Running computer vision" });
     const pythonResult = await runPythonAnalysis(videoPath, job.run);
     pythonGeneratedPaths = getPythonGeneratedPaths(pythonResult);
@@ -575,11 +577,9 @@ async function processVideoJob(jobId) {
     const framePaths = selectFramePaths(pythonResult.sampled_frames || [], 4);
     if (!framePaths.length) throw new Error("Python did not return any usable frame images.");
 
-    // ── Build image inputs for OpenAI ──────────────────────────────────────
     updateJob(jobId, { progress: 68, stage: "Preparing frames for AI" });
     const imageInputs = buildImageInputs(framePaths);
 
-    // ── OpenAI vision call ─────────────────────────────────────────────────
     updateJob(jobId, { progress: 75, stage: "Requesting AI coaching analysis" });
 
     const latestJob = jobs.get(jobId);
@@ -782,6 +782,58 @@ app.get("/analysis-status/:jobId", (req, res) => {
     error: job.error,
     result: job.status === "completed" ? job.result : null,
   });
+});
+
+// ─── Guardian Email (Parental Consent Notification) ──────────────────────────
+
+app.post("/send-guardian-email", async (req, res) => {
+  try {
+    const { guardianEmail, guardianName, minorEmail, minorAge } = req.body;
+
+    if (!guardianEmail || !guardianName || !minorEmail) {
+      return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    await resend.emails.send({
+      from: "Barrel Pro <onboarding@resend.dev>",
+      to: guardianEmail,
+      subject: "Parental Consent Record — Barrel Pro Account",
+      html: `
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 24px;">
+          <h2 style="color: #1ecad3;">Barrel Pro — Parental Consent Record</h2>
+          <p>Hello ${guardianName},</p>
+          <p>This email confirms that a Barrel Pro account was created for a user under 18 years old with your name listed as the parent or legal guardian.</p>
+          <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
+            <tr>
+              <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Account Email</td>
+              <td style="padding: 8px; border: 1px solid #e5e7eb;">${minorEmail}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">User Age</td>
+              <td style="padding: 8px; border: 1px solid #e5e7eb;">${minorAge} years old</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Guardian Name</td>
+              <td style="padding: 8px; border: 1px solid #e5e7eb;">${guardianName}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Date</td>
+              <td style="padding: 8px; border: 1px solid #e5e7eb;">${new Date().toLocaleDateString()}</td>
+            </tr>
+          </table>
+          <p>If you did not authorize this account, please contact us immediately at <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a></p>
+          <p>This record is kept for legal compliance purposes.</p>
+          <p style="color: #9ca3af; font-size: 13px;">Barrel Pro — Built for barrel racers</p>
+        </div>
+      `,
+    });
+
+    console.log("[GUARDIAN EMAIL] Sent to:", guardianEmail);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[GUARDIAN EMAIL ERROR]", err.message);
+    return res.status(500).json({ error: "Failed to send guardian email.", details: err.message });
+  }
 });
 
 // ─── Error Handler ────────────────────────────────────────────────────────────
