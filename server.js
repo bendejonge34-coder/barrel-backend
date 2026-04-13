@@ -795,7 +795,7 @@ app.post("/send-guardian-email", async (req, res) => {
     }
 
     await resend.emails.send({
-      from: "Barrel Pro <onboarding@resend.dev>",
+      from: "Barrel Pro <noreply@fabhorsewear.com>",
       to: guardianEmail,
       subject: "Parental Consent Record — Barrel Pro Account",
       html: `
