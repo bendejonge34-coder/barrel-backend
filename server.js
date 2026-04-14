@@ -47,6 +47,36 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// ─── Firebase Admin (for deleting rejected minor accounts) ───────────────────
+// NOTE: Add firebase-admin to your package.json and set FIREBASE_SERVICE_ACCOUNT env var
+// with the JSON string of your Firebase service account key.
+
+let adminAuth = null;
+let adminDb = null;
+
+try {
+  const { initializeApp, cert, getApps } = await import("firebase-admin/app");
+  const { getAuth } = await import("firebase-admin/auth");
+  const { getFirestore } = await import("firebase-admin/firestore");
+
+  if (!getApps().length) {
+    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
+      ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+      : null;
+
+    if (serviceAccount) {
+      initializeApp({ credential: cert(serviceAccount) });
+      adminAuth = getAuth();
+      adminDb = getFirestore();
+      console.log("[FIREBASE ADMIN] Initialized successfully");
+    } else {
+      console.warn("[FIREBASE ADMIN] FIREBASE_SERVICE_ACCOUNT env not set — reject deletion will be skipped");
+    }
+  }
+} catch (err) {
+  console.warn("[FIREBASE ADMIN] Could not initialize:", err.message);
+}
+
 // ─── Express Setup ────────────────────────────────────────────────────────────
 
 const app = express();
@@ -168,6 +198,7 @@ function getPythonGeneratedPaths(pythonResult) {
 const jobs = new Map();
 const pendingConfirmations = new Map();
 const confirmedUsers = new Map();
+const rejectedUsers = new Set();
 const cleanupTimers = new Map();
 
 function persistJobs() {
@@ -796,18 +827,19 @@ app.post("/send-guardian-email", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields." });
     }
 
-    // Generate a unique confirmation token
     const token = `${userId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    // Store pending confirmation in memory
     pendingConfirmations.set(token, {
       userId,
       minorEmail,
       guardianEmail,
+      guardianName,
       createdAt: Date.now(),
     });
 
-    const confirmUrl = `${process.env.API_BASE_URL || "https://barrel-backend-gyyd.onrender.com"}/confirm-guardian?token=${token}`;
+    const baseUrl = process.env.API_BASE_URL || "https://barrel-backend-gyyd.onrender.com";
+    const confirmUrl = `${baseUrl}/confirm-guardian?token=${token}`;
+    const rejectUrl = `${baseUrl}/reject-guardian?token=${token}`;
 
     await resend.emails.send({
       from: "Barrel Pro <noreply@fabhorsewear.com>",
@@ -815,15 +847,20 @@ app.post("/send-guardian-email", async (req, res) => {
       subject: "Action Required — Confirm Your Child's Barrel Pro Account",
       html: `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 24px;">
-          <h2 style="color: #1ecad3;">Barrel Pro — Parental Confirmation Required</h2>
+          <h2 style="color: #1ecad3;">Barrel Pro — Parental Approval Required</h2>
           <p>Hello ${guardianName},</p>
           <p>A Barrel Pro account was created for a user under 18 with you listed as parent or guardian.</p>
           <p><strong>Your child cannot access the app until you confirm below.</strong></p>
-          <div style="text-align: center; margin: 32px 0;">
+          <div style="text-align: center; margin: 32px 0; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap;">
             <a href="${confirmUrl}"
               style="background: #1ecad3; color: #fff; padding: 16px 32px; border-radius: 8px;
-                     text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block;">
-              ✅ Confirm My Child's Account
+                     text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block; margin: 8px;">
+              ✅ Approve Account
+            </a>
+            <a href="${rejectUrl}"
+              style="background: #b91c1c; color: #fff; padding: 16px 32px; border-radius: 8px;
+                     text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block; margin: 8px;">
+              ❌ Reject & Delete Account
             </a>
           </div>
           <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
@@ -844,7 +881,11 @@ app.post("/send-guardian-email", async (req, res) => {
               <td style="padding: 8px; border: 1px solid #e5e7eb;">${new Date().toLocaleDateString()}</td>
             </tr>
           </table>
-          <p>If you did not authorize this account, please contact us at
+          <p style="color: #6b7280; font-size: 13px;">
+            If you click <strong>Reject</strong>, the account and all associated data will be permanently deleted.
+            If you did not authorize this account creation, please click Reject.
+          </p>
+          <p>Questions? Contact us at
             <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
           </p>
           <p style="color: #9ca3af; font-size: 13px;">Barrel Pro — Built for barrel racers</p>
@@ -860,7 +901,7 @@ app.post("/send-guardian-email", async (req, res) => {
   }
 });
 
-// ─── Guardian Confirmation Endpoint (link guardian clicks in email) ────────────
+// ─── Guardian Confirm Endpoint ────────────────────────────────────────────────
 
 app.get("/confirm-guardian", async (req, res) => {
   try {
@@ -887,7 +928,6 @@ app.get("/confirm-guardian", async (req, res) => {
       `);
     }
 
-    // Mark as confirmed
     confirmedUsers.set(record.userId, {
       confirmedAt: new Date().toISOString(),
       minorEmail: record.minorEmail,
@@ -898,7 +938,7 @@ app.get("/confirm-guardian", async (req, res) => {
 
     return res.send(`
       <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-        <h2 style="color:#1ecad3;">✅ Account Confirmed!</h2>
+        <h2 style="color:#1ecad3;">✅ Account Approved!</h2>
         <p>Your child's Barrel Pro account has been approved.</p>
         <p>They can now open the app and log in.</p>
         <p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p>
@@ -917,15 +957,108 @@ app.get("/confirm-guardian", async (req, res) => {
   }
 });
 
-// ─── Check Guardian Confirmation Status (app polls this) ──────────────────────
+// ─── Guardian Reject Endpoint (FIX 7 + 12) ───────────────────────────────────
+// When parent clicks Reject: deletes Firebase Auth account + Firestore data
+
+app.get("/reject-guardian", async (req, res) => {
+  try {
+    const token = String(req.query.token || "").trim();
+    if (!token) {
+      return res.status(400).send(`
+        <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
+          <h2 style="color:#b91c1c;">Invalid Link</h2>
+          <p>This rejection link is invalid. Please check your email and try again.</p>
+        </div>
+      `);
+    }
+
+    const record = pendingConfirmations.get(token);
+    if (!record) {
+      return res.status(400).send(`
+        <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
+          <h2 style="color:#b91c1c;">Link Expired or Already Used</h2>
+          <p>This link has already been used or has expired.</p>
+          <p>If you need assistance, contact us at
+            <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
+          </p>
+        </div>
+      `);
+    }
+
+    const { userId, minorEmail } = record;
+    pendingConfirmations.delete(token);
+    rejectedUsers.add(userId);
+
+    console.log("[GUARDIAN REJECTED] userId:", userId, "email:", minorEmail);
+
+    // Delete Firebase Auth account
+    if (adminAuth) {
+      try {
+        await adminAuth.deleteUser(userId);
+        console.log("[REJECT] Deleted Firebase Auth user:", userId);
+      } catch (err) {
+        console.error("[REJECT] Could not delete Firebase Auth user:", err.message);
+      }
+    } else {
+      console.warn("[REJECT] Firebase Admin not initialized — Auth user not deleted");
+    }
+
+    // Delete Firestore data
+    if (adminDb) {
+      try {
+        const collections = ["runs", "profile", "account", "consent"];
+        for (const col of collections) {
+          try {
+            const snapshot = await adminDb.collection(`users/${userId}/${col}`).get();
+            const batch = adminDb.batch();
+            snapshot.docs.forEach((d) => batch.delete(d.ref));
+            if (!snapshot.empty) await batch.commit();
+            console.log(`[REJECT] Deleted Firestore collection users/${userId}/${col}`);
+          } catch (colErr) {
+            console.warn(`[REJECT] Could not delete collection ${col}:`, colErr.message);
+          }
+        }
+        // Delete the user document itself
+        await adminDb.doc(`users/${userId}`).delete();
+        console.log("[REJECT] Deleted Firestore user document:", userId);
+      } catch (err) {
+        console.error("[REJECT] Firestore cleanup error:", err.message);
+      }
+    } else {
+      console.warn("[REJECT] Firebase Admin not initialized — Firestore data not deleted");
+    }
+
+    return res.send(`
+      <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
+        <h2 style="color:#b91c1c;">Account Rejected</h2>
+        <p>The Barrel Pro account for <strong>${minorEmail}</strong> has been rejected and permanently deleted.</p>
+        <p>All associated data has been removed from our servers.</p>
+        <p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p>
+      </div>
+    `);
+  } catch (err) {
+    console.error("[GUARDIAN REJECT ERROR]", err.message);
+    return res.status(500).send(`
+      <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
+        <h2 style="color:#b91c1c;">Something Went Wrong</h2>
+        <p>Please try again or contact us at
+          <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
+        </p>
+      </div>
+    `);
+  }
+});
+
+// ─── Check Guardian Status (app polls this at login) ─────────────────────────
 
 app.get("/guardian-status/:userId", (req, res) => {
   const userId = String(req.params.userId || "").trim();
   if (!userId) return res.status(400).json({ ok: false, error: "Missing userId." });
 
   const confirmed = confirmedUsers.has(userId);
-  console.log("[GUARDIAN STATUS]", userId, "confirmed:", confirmed);
-  return res.json({ ok: true, confirmed });
+  const rejected = rejectedUsers.has(userId);
+  console.log("[GUARDIAN STATUS]", userId, "confirmed:", confirmed, "rejected:", rejected);
+  return res.json({ ok: true, confirmed, rejected });
 });
 
 // ─── Error Handler ────────────────────────────────────────────────────────────
