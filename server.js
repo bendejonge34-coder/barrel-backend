@@ -166,6 +166,8 @@ function getPythonGeneratedPaths(pythonResult) {
 // ─── Job Store ────────────────────────────────────────────────────────────────
 
 const jobs = new Map();
+const pendingConfirmations = new Map();
+const confirmedUsers = new Map();
 const cleanupTimers = new Map();
 
 function persistJobs() {
@@ -784,25 +786,46 @@ app.get("/analysis-status/:jobId", (req, res) => {
   });
 });
 
-// ─── Guardian Email (Parental Consent Notification) ──────────────────────────
+// ─── Guardian Email (Parental Consent + Confirmation) ─────────────────────────
 
 app.post("/send-guardian-email", async (req, res) => {
   try {
-    const { guardianEmail, guardianName, minorEmail, minorAge } = req.body;
+    const { guardianEmail, guardianName, minorEmail, minorAge, userId } = req.body;
 
-    if (!guardianEmail || !guardianName || !minorEmail) {
+    if (!guardianEmail || !guardianName || !minorEmail || !userId) {
       return res.status(400).json({ error: "Missing required fields." });
     }
+
+    // Generate a unique confirmation token
+    const token = `${userId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // Store pending confirmation in memory
+    pendingConfirmations.set(token, {
+      userId,
+      minorEmail,
+      guardianEmail,
+      createdAt: Date.now(),
+    });
+
+    const confirmUrl = `${process.env.API_BASE_URL || "https://barrel-backend-gyyd.onrender.com"}/confirm-guardian?token=${token}`;
 
     await resend.emails.send({
       from: "Barrel Pro <noreply@fabhorsewear.com>",
       to: guardianEmail,
-      subject: "Parental Consent Record — Barrel Pro Account",
+      subject: "Action Required — Confirm Your Child's Barrel Pro Account",
       html: `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 24px;">
-          <h2 style="color: #1ecad3;">Barrel Pro — Parental Consent Record</h2>
+          <h2 style="color: #1ecad3;">Barrel Pro — Parental Confirmation Required</h2>
           <p>Hello ${guardianName},</p>
-          <p>This email confirms that a Barrel Pro account was created for a user under 18 years old with your name listed as the parent or legal guardian.</p>
+          <p>A Barrel Pro account was created for a user under 18 with you listed as parent or guardian.</p>
+          <p><strong>Your child cannot access the app until you confirm below.</strong></p>
+          <div style="text-align: center; margin: 32px 0;">
+            <a href="${confirmUrl}"
+              style="background: #1ecad3; color: #fff; padding: 16px 32px; border-radius: 8px;
+                     text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block;">
+              ✅ Confirm My Child's Account
+            </a>
+          </div>
           <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
             <tr>
               <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Account Email</td>
@@ -821,19 +844,88 @@ app.post("/send-guardian-email", async (req, res) => {
               <td style="padding: 8px; border: 1px solid #e5e7eb;">${new Date().toLocaleDateString()}</td>
             </tr>
           </table>
-          <p>If you did not authorize this account, please contact us immediately at <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a></p>
-          <p>This record is kept for legal compliance purposes.</p>
+          <p>If you did not authorize this account, please contact us at
+            <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
+          </p>
           <p style="color: #9ca3af; font-size: 13px;">Barrel Pro — Built for barrel racers</p>
         </div>
       `,
     });
 
-    console.log("[GUARDIAN EMAIL] Sent to:", guardianEmail);
-    return res.json({ ok: true });
+    console.log("[GUARDIAN EMAIL] Sent to:", guardianEmail, "token:", token);
+    return res.json({ ok: true, token });
   } catch (err) {
     console.error("[GUARDIAN EMAIL ERROR]", err.message);
     return res.status(500).json({ error: "Failed to send guardian email.", details: err.message });
   }
+});
+
+// ─── Guardian Confirmation Endpoint (link guardian clicks in email) ────────────
+
+app.get("/confirm-guardian", async (req, res) => {
+  try {
+    const token = String(req.query.token || "").trim();
+    if (!token) {
+      return res.status(400).send(`
+        <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
+          <h2 style="color:#b91c1c;">Invalid Link</h2>
+          <p>This confirmation link is invalid. Please check your email and try again.</p>
+        </div>
+      `);
+    }
+
+    const record = pendingConfirmations.get(token);
+    if (!record) {
+      return res.status(400).send(`
+        <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
+          <h2 style="color:#b91c1c;">Link Expired or Already Used</h2>
+          <p>This confirmation link has already been used or has expired.</p>
+          <p>If your child still cannot log in, please contact us at
+            <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
+          </p>
+        </div>
+      `);
+    }
+
+    // Mark as confirmed
+    confirmedUsers.set(record.userId, {
+      confirmedAt: new Date().toISOString(),
+      minorEmail: record.minorEmail,
+    });
+    pendingConfirmations.delete(token);
+
+    console.log("[GUARDIAN CONFIRMED] userId:", record.userId);
+
+    return res.send(`
+      <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
+        <h2 style="color:#1ecad3;">✅ Account Confirmed!</h2>
+        <p>Your child's Barrel Pro account has been approved.</p>
+        <p>They can now open the app and log in.</p>
+        <p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p>
+      </div>
+    `);
+  } catch (err) {
+    console.error("[GUARDIAN CONFIRM ERROR]", err.message);
+    return res.status(500).send(`
+      <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
+        <h2 style="color:#b91c1c;">Something Went Wrong</h2>
+        <p>Please try clicking the link again or contact us at
+          <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
+        </p>
+      </div>
+    `);
+  }
+});
+
+// ─── Check Guardian Confirmation Status (app polls this) ──────────────────────
+
+app.get("/guardian-status/:userId", (req, res) => {
+  const userId = String(req.params.userId || "").trim();
+  if (!userId) return res.status(400).json({ ok: false, error: "Missing userId." });
+
+  const confirmed = confirmedUsers.has(userId);
+  console.log("[GUARDIAN STATUS]", userId, "confirmed:", confirmed);
+  return res.json({ ok: true, confirmed });
 });
 
 // ─── Error Handler ────────────────────────────────────────────────────────────
