@@ -201,6 +201,53 @@ const confirmedUsers = new Map();
 const rejectedUsers = new Set();
 const cleanupTimers = new Map();
 
+// Persistence files for guardian state (survives Render restarts)
+const GUARDIAN_STORE_FILE = path.join(process.cwd(), "guardian-store.json");
+
+function persistGuardianStore() {
+  try {
+    const data = {
+      savedAt: new Date().toISOString(),
+      pendingConfirmations: Array.from(pendingConfirmations.entries()),
+      confirmedUsers: Array.from(confirmedUsers.entries()),
+      rejectedUsers: Array.from(rejectedUsers),
+    };
+    fs.writeFileSync(GUARDIAN_STORE_FILE, JSON.stringify(data, null, 2), "utf8");
+  } catch (err) {
+    console.error("[GUARDIAN PERSIST] Failed:", err.message);
+  }
+}
+
+function restoreGuardianStore() {
+  try {
+    if (!fs.existsSync(GUARDIAN_STORE_FILE)) return;
+    const parsed = safeParseJson(fs.readFileSync(GUARDIAN_STORE_FILE, "utf8"));
+    if (!parsed) return;
+    // Restore pending confirmations (skip expired ones older than 7 days)
+    const sevenDays = 1000 * 60 * 60 * 24 * 7;
+    if (Array.isArray(parsed.pendingConfirmations)) {
+      for (const [token, record] of parsed.pendingConfirmations) {
+        if (Date.now() - record.createdAt < sevenDays) {
+          pendingConfirmations.set(token, record);
+        }
+      }
+    }
+    if (Array.isArray(parsed.confirmedUsers)) {
+      for (const [userId, data] of parsed.confirmedUsers) {
+        confirmedUsers.set(userId, data);
+      }
+    }
+    if (Array.isArray(parsed.rejectedUsers)) {
+      for (const userId of parsed.rejectedUsers) {
+        rejectedUsers.add(userId);
+      }
+    }
+    console.log("[GUARDIAN RESTORE] pending:", pendingConfirmations.size, "confirmed:", confirmedUsers.size, "rejected:", rejectedUsers.size);
+  } catch (err) {
+    console.error("[GUARDIAN RESTORE] Failed:", err.message);
+  }
+}
+
 function persistJobs() {
   try {
     fs.writeFileSync(
@@ -729,6 +776,7 @@ function startJobProcessing(job) {
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 restoreJobs();
+restoreGuardianStore();
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -836,6 +884,7 @@ app.post("/send-guardian-email", async (req, res) => {
       guardianName,
       createdAt: Date.now(),
     });
+    persistGuardianStore();
 
     const baseUrl = process.env.API_BASE_URL || "https://barrel-backend-gyyd.onrender.com";
     const confirmUrl = `${baseUrl}/confirm-guardian?token=${token}`;
@@ -933,6 +982,7 @@ app.get("/confirm-guardian", async (req, res) => {
       minorEmail: record.minorEmail,
     });
     pendingConfirmations.delete(token);
+    persistGuardianStore();
 
     console.log("[GUARDIAN CONFIRMED] userId:", record.userId);
 
@@ -988,6 +1038,7 @@ app.get("/reject-guardian", async (req, res) => {
     const { userId, minorEmail } = record;
     pendingConfirmations.delete(token);
     rejectedUsers.add(userId);
+    persistGuardianStore();
 
     console.log("[GUARDIAN REJECTED] userId:", userId, "email:", minorEmail);
 
