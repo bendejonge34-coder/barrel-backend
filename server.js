@@ -201,44 +201,54 @@ const confirmedUsers = new Map();
 const rejectedUsers = new Set();
 const cleanupTimers = new Map();
 
-// Persistence files for guardian state (survives Render restarts)
-const GUARDIAN_STORE_FILE = path.join(process.cwd(), "guardian-store.json");
+// ─── Guardian Store (Firestore-backed — survives Render restarts and deploys) ──
 
-function persistGuardianStore() {
+async function persistGuardianStore() {
+  if (!adminDb) return; // Fall back silently if Firebase Admin not ready
   try {
-    const data = {
+    await adminDb.doc("barrel_pro_system/guardian_store").set({
       savedAt: new Date().toISOString(),
-      pendingConfirmations: Array.from(pendingConfirmations.entries()),
-      confirmedUsers: Array.from(confirmedUsers.entries()),
+      pendingConfirmations: Array.from(pendingConfirmations.entries()).map(([token, record]) => ({ token, ...record })),
+      confirmedUsers: Array.from(confirmedUsers.entries()).map(([userId, data]) => ({ userId, ...data })),
       rejectedUsers: Array.from(rejectedUsers),
-    };
-    fs.writeFileSync(GUARDIAN_STORE_FILE, JSON.stringify(data, null, 2), "utf8");
+    });
   } catch (err) {
     console.error("[GUARDIAN PERSIST] Failed:", err.message);
   }
 }
 
-function restoreGuardianStore() {
+async function restoreGuardianStore() {
+  if (!adminDb) {
+    console.warn("[GUARDIAN RESTORE] Firebase Admin not ready — skipping restore");
+    return;
+  }
   try {
-    if (!fs.existsSync(GUARDIAN_STORE_FILE)) return;
-    const parsed = safeParseJson(fs.readFileSync(GUARDIAN_STORE_FILE, "utf8"));
-    if (!parsed) return;
-    // Restore pending confirmations (skip expired ones older than 7 days)
+    const snap = await adminDb.doc("barrel_pro_system/guardian_store").get();
+    if (!snap.exists) {
+      console.log("[GUARDIAN RESTORE] No stored data found");
+      return;
+    }
+    const data = snap.data();
     const sevenDays = 1000 * 60 * 60 * 24 * 7;
-    if (Array.isArray(parsed.pendingConfirmations)) {
-      for (const [token, record] of parsed.pendingConfirmations) {
-        if (Date.now() - record.createdAt < sevenDays) {
-          pendingConfirmations.set(token, record);
+
+    if (Array.isArray(data.pendingConfirmations)) {
+      for (const record of data.pendingConfirmations) {
+        if (record.token && Date.now() - record.createdAt < sevenDays) {
+          const { token, ...rest } = record;
+          pendingConfirmations.set(token, rest);
         }
       }
     }
-    if (Array.isArray(parsed.confirmedUsers)) {
-      for (const [userId, data] of parsed.confirmedUsers) {
-        confirmedUsers.set(userId, data);
+    if (Array.isArray(data.confirmedUsers)) {
+      for (const record of data.confirmedUsers) {
+        if (record.userId) {
+          const { userId, ...rest } = record;
+          confirmedUsers.set(userId, rest);
+        }
       }
     }
-    if (Array.isArray(parsed.rejectedUsers)) {
-      for (const userId of parsed.rejectedUsers) {
+    if (Array.isArray(data.rejectedUsers)) {
+      for (const userId of data.rejectedUsers) {
         rejectedUsers.add(userId);
       }
     }
@@ -776,7 +786,9 @@ function startJobProcessing(job) {
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 restoreJobs();
-restoreGuardianStore();
+
+// Restore guardian store from Firestore (async — runs in background on boot)
+restoreGuardianStore().catch((err) => console.error("[BOOT] Guardian restore failed:", err.message));
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
