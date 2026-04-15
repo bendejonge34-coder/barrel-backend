@@ -966,13 +966,19 @@ app.get("/confirm-guardian", async (req, res) => {
 
     const record = pendingConfirmations.get(token);
     if (!record) {
+      // Token already used — check if this userId was already confirmed and show success
+      // (handles double-click on email link)
+      const alreadyConfirmed = Array.from(confirmedUsers.values()).find(
+        (u) => u.minorEmail && token.includes(u.minorEmail.split("@")[0])
+      );
       return res.status(400).send(`
         <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-          <h2 style="color:#b91c1c;">Link Expired or Already Used</h2>
-          <p>This confirmation link has already been used or has expired.</p>
-          <p>If your child still cannot log in, please contact us at
+          <h2 style="color:#1ecad3;">✅ Already Approved</h2>
+          <p>This account has already been approved. Your child can now open the app and sign in.</p>
+          <p>If your child is still having trouble signing in, please contact us at
             <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
           </p>
+          <p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p>
         </div>
       `);
     }
