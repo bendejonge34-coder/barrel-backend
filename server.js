@@ -783,7 +783,72 @@ function startJobProcessing(job) {
   else if (job.kind === "text") void processTextJob(job.id);
 }
 
-// ─── Boot ─────────────────────────────────────────────────────────────────────
+// ─── Expired Minor Account Cleanup (runs every 6 hours) ──────────────────────
+// If a guardian hasn't responded in 7 days, delete the minor's account and data
+
+async function cleanupExpiredMinorAccounts() {
+  const sevenDays = 1000 * 60 * 60 * 24 * 7;
+  const now = Date.now();
+  const expired = [];
+
+  for (const [token, record] of pendingConfirmations.entries()) {
+    if (now - record.createdAt >= sevenDays) {
+      expired.push({ token, record });
+    }
+  }
+
+  if (!expired.length) {
+    console.log("[CLEANUP] No expired minor accounts found");
+    return;
+  }
+
+  console.log(`[CLEANUP] Found ${expired.length} expired minor account(s) — deleting`);
+
+  for (const { token, record } of expired) {
+    const { userId, minorEmail } = record;
+    pendingConfirmations.delete(token);
+    console.log(`[CLEANUP] Deleting expired account: ${minorEmail} (${userId})`);
+
+    // Delete Firebase Auth account
+    if (adminAuth) {
+      try {
+        await adminAuth.deleteUser(userId);
+        console.log(`[CLEANUP] Deleted Auth user: ${userId}`);
+      } catch (err) {
+        console.warn(`[CLEANUP] Could not delete Auth user ${userId}:`, err.message);
+      }
+    }
+
+    // Delete Firestore data
+    if (adminDb) {
+      try {
+        const collections = ["runs", "profile", "account", "consent"];
+        for (const col of collections) {
+          try {
+            const snapshot = await adminDb.collection(`users/${userId}/${col}`).get();
+            const batch = adminDb.batch();
+            snapshot.docs.forEach((d) => batch.delete(d.ref));
+            if (!snapshot.empty) await batch.commit();
+          } catch { /* silent per collection */ }
+        }
+        await adminDb.doc(`users/${userId}`).delete();
+        console.log(`[CLEANUP] Deleted Firestore data for: ${userId}`);
+      } catch (err) {
+        console.warn(`[CLEANUP] Firestore cleanup error for ${userId}:`, err.message);
+      }
+    }
+  }
+
+  await persistGuardianStore();
+  console.log(`[CLEANUP] Expired account cleanup complete`);
+}
+
+// Run cleanup every 6 hours
+setInterval(() => {
+  cleanupExpiredMinorAccounts().catch((err) =>
+    console.error("[CLEANUP] Error:", err.message)
+  );
+}, 1000 * 60 * 60 * 6);
 
 restoreJobs();
 
@@ -1126,8 +1191,10 @@ app.get("/guardian-status/:userId", (req, res) => {
 
   const confirmed = confirmedUsers.has(userId);
   const rejected = rejectedUsers.has(userId);
-  console.log("[GUARDIAN STATUS]", userId, "confirmed:", confirmed, "rejected:", rejected);
-  return res.json({ ok: true, confirmed, rejected });
+  const pending = Array.from(pendingConfirmations.values()).some((r) => r.userId === userId);
+
+  console.log("[GUARDIAN STATUS]", userId, "confirmed:", confirmed, "rejected:", rejected, "pending:", pending);
+  return res.json({ ok: true, confirmed, rejected, pending });
 });
 
 // ─── Error Handler ────────────────────────────────────────────────────────────
