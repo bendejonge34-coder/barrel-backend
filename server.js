@@ -47,9 +47,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ─── Firebase Admin (for deleting rejected minor accounts) ───────────────────
-// NOTE: Add firebase-admin to your package.json and set FIREBASE_SERVICE_ACCOUNT env var
-// with the JSON string of your Firebase service account key.
+// ─── Firebase Admin ───────────────────────────────────────────────────────────
 
 let adminAuth = null;
 let adminDb = null;
@@ -201,10 +199,10 @@ const confirmedUsers = new Map();
 const rejectedUsers = new Set();
 const cleanupTimers = new Map();
 
-// ─── Guardian Store (Firestore-backed — survives Render restarts and deploys) ──
+// ─── Guardian Store (Firestore-backed) ────────────────────────────────────────
 
 async function persistGuardianStore() {
-  if (!adminDb) return; // Fall back silently if Firebase Admin not ready
+  if (!adminDb) return;
   try {
     await adminDb.doc("barrel_pro_system/guardian_store").set({
       savedAt: new Date().toISOString(),
@@ -417,153 +415,274 @@ function buildImageInputs(framePaths) {
   }));
 }
 
+// ─── Historical Context Builder ───────────────────────────────────────────────
+// IMPROVEMENT #2: Feed the AI rich historical data so it coaches like a real trainer
+// who knows this horse and rider's full history — not just this one run.
+
+function buildHistoricalContext(run) {
+  const history = run?.runHistory || [];
+  const horseName = run?.horse || "this horse";
+
+  if (!history || history.length === 0) {
+    return `No previous run history available for ${horseName}. This appears to be the first logged run.`;
+  }
+
+  // Filter to runs for this same horse
+  const horseRuns = history.filter(r => r.horse === horseName && r.time && !isNaN(parseFloat(r.time)));
+  
+  if (horseRuns.length === 0) {
+    return `No previous timed runs found for ${horseName}.`;
+  }
+
+  const times = horseRuns.map(r => parseFloat(r.time)).filter(t => !isNaN(t));
+  const currentTime = parseFloat(run?.time);
+  
+  const best = times.length > 0 ? Math.min(...times) : null;
+  const avg = times.length > 0 ? (times.reduce((a, b) => a + b, 0) / times.length).toFixed(3) : null;
+  const worst = times.length > 0 ? Math.max(...times) : null;
+
+  // Trend: compare last 3 runs to previous 3
+  const recent3 = times.slice(0, 3);
+  const prior3 = times.slice(3, 6);
+  let trend = "insufficient data for trend";
+  if (recent3.length >= 2 && prior3.length >= 2) {
+    const recentAvg = recent3.reduce((a, b) => a + b, 0) / recent3.length;
+    const priorAvg = prior3.reduce((a, b) => a + b, 0) / prior3.length;
+    const diff = (recentAvg - priorAvg).toFixed(3);
+    if (recentAvg < priorAvg) trend = `improving (${Math.abs(diff)}s faster recently)`;
+    else if (recentAvg > priorAvg) trend = `slower recently (${diff}s off pace)`;
+    else trend = "consistent";
+  }
+
+  // Compare this run to personal best
+  let vsPersonalBest = "";
+  if (best && !isNaN(currentTime)) {
+    const diff = (currentTime - best).toFixed(3);
+    if (diff <= 0) vsPersonalBest = `This is a NEW PERSONAL BEST by ${Math.abs(diff)}s!`;
+    else vsPersonalBest = `This run is ${diff}s off the personal best.`;
+  }
+
+  // Arena condition history
+  const arenaHistory = horseRuns
+    .filter(r => r.arenaCondition)
+    .slice(0, 5)
+    .map(r => `${r.arenaCondition}: ${r.time}s`)
+    .join(", ");
+
+  // Recent show results
+  const recentShows = horseRuns
+    .filter(r => r.showName)
+    .slice(0, 5)
+    .map(r => {
+      const parts = [`${r.showName}: ${r.time}s`];
+      if (r.placing) parts.push(`placed ${r.placing}`);
+      if (r.earnings) parts.push(`earned $${r.earnings}`);
+      return parts.join(", ");
+    })
+    .join(" | ");
+
+  // Rider notes from recent runs — gold for the AI
+  const recentNotes = horseRuns
+    .filter(r => r.riderFeedback || r.notes)
+    .slice(0, 4)
+    .map(r => {
+      const parts = [];
+      if (r.riderFeedback) parts.push(`Rider felt: "${r.riderFeedback}"`);
+      if (r.notes) parts.push(`Notes: "${r.notes}"`);
+      return parts.join(" | ");
+    })
+    .join("\n  ");
+
+  return `
+HORSE HISTORY FOR ${horseName.toUpperCase()} (${horseRuns.length} logged runs):
+- Personal best time: ${best ? best + "s" : "unknown"}
+- Average time: ${avg ? avg + "s" : "unknown"}
+- Worst time: ${worst ? worst + "s" : "unknown"}
+- Performance trend: ${trend}
+- ${vsPersonalBest}
+
+Arena condition performance:
+  ${arenaHistory || "No arena condition data available"}
+
+Recent show results:
+  ${recentShows || "No show data available"}
+
+Recent rider feedback and notes:
+  ${recentNotes || "No recent notes available"}
+  `.trim();
+}
+
 // ─── AI Prompts ───────────────────────────────────────────────────────────────
+// IMPROVEMENT #1: Completely rewritten prompts — expert barrel racing voice,
+// specific terminology, pattern-based coaching, and actionable feedback.
 
 function buildCvSummary(run, pythonResult) {
   const barrels = pythonResult?.identified_barrels || {};
   const splits = pythonResult?.splits || {};
-  const insights = Array.isArray(pythonResult?.insights) ? pythonResult.insights.slice(0, 4) : [];
+  const insights = Array.isArray(pythonResult?.insights) ? pythonResult.insights.slice(0, 6) : [];
   const splitsMethod = splits?.splits_method || "unknown";
 
-  const barrelLines = ["barrel1", "barrel2", "barrel3"].map((name) => {
+  const barrelLines = ["barrel1", "barrel2", "barrel3"].map((name, i) => {
     const b = barrels[name];
-    if (!b) return `${name}: not detected`;
-    return `${name}: center=(${b.center_x}, ${b.center_y}), detections=${b.detection_count}`;
+    const label = ["First", "Second", "Third"][i];
+    if (!b) return `${label} barrel: not detected`;
+    return `${label} barrel: center=(${b.center_x}, ${b.center_y}), detection count=${b.detection_count}`;
+  });
+
+  // Turn quality details
+  const turns = pythonResult?.turns || {};
+  const turnLines = ["barrel1", "barrel2", "barrel3"].map((name, i) => {
+    const t = turns[name];
+    const label = ["First", "Second", "Third"][i];
+    if (!t) return `${label} barrel turn: no data`;
+    return `${label} barrel turn: apex_frame=${t.apex_frame ?? "n/a"}, min_distance_px=${t.min_distance_px ?? "n/a"}, entry_speed=${t.entry_speed_estimate ?? "n/a"}`;
   });
 
   return `
-Computer vision data:
-- Run duration: ${pythonResult?.duration_seconds ?? "unknown"} seconds
+COMPUTER VISION DATA:
+- Total run duration: ${pythonResult?.duration_seconds ?? "unknown"} seconds
 - Horse detected in ${pythonResult?.horse_detected_frames ?? "unknown"} frames
-- Pattern direction: ${pythonResult?.pattern_direction ?? "unknown"}
-- Barrel ID method: ${pythonResult?.tracking_quality?.barrel_id_method ?? "unknown"}
-- Dense pass used: ${pythonResult?.tracking_quality?.dense_pass_used ?? false}
+- Pattern direction: ${pythonResult?.pattern_direction ?? "unknown"} (right = 1st barrel to the right)
+- Video resolution: ${pythonResult?.width ?? "?"}x${pythonResult?.height ?? "?"}
+- FPS: ${pythonResult?.fps ?? "?"}
+- Tracking quality: ${JSON.stringify(pythonResult?.tracking_quality || {})}
+- Dense tracking pass used: ${pythonResult?.tracking_quality?.dense_pass_used ?? false}
 
-Barrel positions:
-- ${barrelLines.join("\n- ")}
+BARREL POSITIONS DETECTED:
+${barrelLines.map(l => `- ${l}`).join("\n")}
 
-Split times (method: ${splitsMethod}):
-- Start to 1st barrel: ${splits?.start_to_barrel1_seconds ?? "n/a"} sec
-- 1st to 2nd barrel: ${splits?.barrel1_to_barrel2_seconds ?? "n/a"} sec
-- 2nd to 3rd barrel: ${splits?.barrel2_to_barrel3_seconds ?? "n/a"} sec
-- 3rd barrel to home: ${splits?.barrel3_to_home_seconds ?? "n/a"} sec
+TURN APEX DATA:
+${turnLines.map(l => `- ${l}`).join("\n")}
 
-CV insights:
-${insights.length ? insights.map((i) => `- ${i}`).join("\n") : "- none"}
+SPLIT TIMES (method: ${splitsMethod}):
+- Alley to first barrel: ${splits?.start_to_barrel1_seconds ?? "n/a"} sec
+- First to second barrel: ${splits?.barrel1_to_barrel2_seconds ?? "n/a"} sec
+- Second to third barrel: ${splits?.barrel2_to_barrel3_seconds ?? "n/a"} sec
+- Third barrel to home: ${splits?.barrel3_to_home_seconds ?? "n/a"} sec
+- TOTAL tracked time: ${pythonResult?.duration_seconds ?? "n/a"} sec
 
-Run details:
+CV INSIGHTS FROM VISION MODEL:
+${insights.length ? insights.map(i => `- ${i}`).join("\n") : "- None generated"}
+
+THIS RUN DATA:
 - Horse: ${run?.horse || "not provided"}
-- Time: ${run?.time || "not provided"} seconds
+- Official time: ${run?.time || "not provided"} seconds
 - Show: ${run?.showName || "not provided"}
 - Location: ${run?.location || "not provided"}
 - Arena condition: ${run?.arenaCondition || "not provided"}
 - Placing: ${run?.placing || "not provided"}
-- Earnings: ${run?.earnings || "not provided"}
-- Rider feedback: ${run?.riderFeedback || "none"}
-- Notes: ${run?.notes || "none"}
+- Earnings: $${run?.earnings || "0"}
+- Rider's own feedback: "${run?.riderFeedback || "none"}"
+- Additional notes: "${run?.notes || "none"}"
   `.trim();
 }
 
 function buildVideoPrompt(run, pythonResult) {
   const cvSummary = buildCvSummary(run, pythonResult);
+  const historicalContext = buildHistoricalContext(run);
+  const horseName = run?.horse || "this horse";
+  const riderName = run?.rider || "the rider";
 
   return `
-You are a seasoned professional barrel racer and coach with decades of competitive experience — NFR qualifications, world titles, and coaching champions. You speak directly, practically, and with real expertise. You sound like a real barrel racer standing at the gate, not a generic sports coach.
+You are an elite barrel racing coach — think of the best combination of a seasoned NFR competitor, a patient trainer, and a sharp analyst. You have watched thousands of runs and coached riders from beginners to world champions. You know this sport from the inside out.
 
-You are reviewing video frames and computer vision data from a barrel racing run. Give this rider specific, no-nonsense coaching feedback.
+You are reviewing video frame captures and computer vision tracking data from a live barrel racing run. Your job is to give ${riderName} on ${horseName} specific, expert coaching feedback that will actually help them go faster.
 
-Use proper barrel racing terminology naturally:
-- Rate (slowing before a barrel), pocket (space around a barrel), drive (forward momentum exiting)
-- Shoulder control, lead changes, collection, run-down
-- First barrel, second barrel, third barrel (not "barrel 1" in coaching text)
-- Home (finish line), alley (entry run)
-
-Coaching priorities — address in order of impact on time:
-1. The single most important thing this rider needs to fix RIGHT NOW
-2. What they did well and should keep doing
-3. Specific issues at each barrel where evidence exists
-4. Drills that directly address what you see
-5. Where time is being lost on this run
-
-Rules:
-- Be direct and specific. "Your horse dropped its shoulder entering the first barrel" beats "there were issues at barrel one."
-- If you can see something in the frames, say exactly what you see.
-- If data is limited, say so honestly but still give your best read.
-- Do NOT invent details not supported by the data or frames.
-- Summary: 2-3 punchy sentences like you're talking to a rider at the gate.
+CRITICAL RULES FOR YOUR RESPONSE:
+- You are NOT a generic sports AI. You are a barrel racing expert. Sound like one.
+- Use barrel racing terminology naturally: rate, pocket, drive, collection, lead, shoulder, run-down, alley, home, inside leg, outside rein, rate point, two-tracking, over-running, under-running
+- Address each barrel by name (first barrel, second barrel, third barrel) — never "barrel 1"
+- Be direct. "Your horse is dropping its outside shoulder entering the second barrel and blowing past the pocket" beats "there may be issues at barrel two"
+- If a split time is significantly slower than the others, name it. That's where the time is going.
+- If you can see something specific in the frame data, say exactly what you see
+- If data is limited or tracking was partial, be honest but still give your best read
+- Do NOT pad the response with generic encouragement. Every sentence should be useful.
+- The summary should sound like you're standing at the gate talking to the rider right after the run
+- strengths, issues, workOns, drills: 2-4 items each, quality over quantity
+- drills must be SPECIFIC to what you see — not generic exercises
 - "bestBarrel" and "bestTurn" must be exactly: "1st", "2nd", or "3rd"
-- "focusNext" must be one short specific coaching cue — the single most important thing
-- "speedInsight" — where is this run losing time? Be specific.
-- "accuracyNotes" — honest note on what you could and could not see clearly
-- 2-3 items each in strengths/issues/workOns/drills — quality over quantity
-- Return ONLY valid JSON. No markdown. No backticks.
+- "focusNext" is ONE short, specific coaching cue — the single most important thing
+- "speedInsight" must name WHERE time is being lost and WHY based on the data
+- "splitAnalysis" — analyze each split time in context. Which was strongest? Which cost time?
+- "patternNotes" — describe what the path data tells you about this horse's pattern shape
+- Return ONLY valid JSON. No markdown fences. No explanation text. Pure JSON.
 
 ${cvSummary}
 
-Return ONLY valid JSON:
+${historicalContext}
+
+Return ONLY this JSON structure with no extra text:
 
 {
-  "summary": "Direct 2-3 sentence coaching read like you are talking at the gate.",
+  "summary": "2-3 sentences max. Direct gate-side coaching voice. What just happened and what matters most.",
   "bestBarrel": "1st",
   "bestTurn": "2nd",
-  "focusNext": "Rate earlier and give more pocket at the first barrel",
-  "speedInsight": "This run is losing time in the run-down to the first barrel.",
-  "accuracyNotes": "Split times are estimates from video tracking — use as coaching reference, not official data.",
-  "strengths": ["Good forward drive out of the second barrel", "Horse showed nice collection at the third"],
-  "issues": ["Coming in too straight to the first barrel", "Dropping the outside shoulder through the second"],
-  "workOns": ["Work your approach angle to the first barrel", "Focus on outside shoulder through the turn"],
-  "drills": ["Set a cone 6 feet past your first barrel and run to that cone", "Trot figure-8s focusing on outside shoulder elevation"]
+  "focusNext": "The single most important coaching cue — one specific, actionable thing",
+  "speedInsight": "Exactly where time is being lost on this run and why — be specific to the split data",
+  "splitAnalysis": "Read of each split time — which was strong, which was slow, and what it tells you about the pattern",
+  "patternNotes": "What the tracking data tells you about how this horse is running the pattern — pocket size, approach angles, line shape",
+  "accuracyNotes": "Honest note on what you could and could not see clearly in this footage",
+  "strengths": ["Specific strength 1", "Specific strength 2"],
+  "issues": ["Specific issue 1 with detail", "Specific issue 2 with detail"],
+  "workOns": ["Specific thing to work on 1", "Specific thing to work on 2"],
+  "drills": ["Specific drill 1 tied to what you saw", "Specific drill 2 tied to what you saw"]
 }
   `.trim();
 }
 
 function buildTextOnlyPrompt(run) {
+  const historicalContext = buildHistoricalContext(run);
+  const horseName = run?.horse || "this horse";
+  const riderName = run?.rider || "the rider";
+
   return `
-You are a seasoned professional barrel racer and coach with decades of competitive experience — NFR qualifications, world titles, and coaching champions. You speak directly, practically, and with real expertise. You sound like a real barrel racer, not a generic sports coach.
+You are an elite barrel racing coach — NFR-level experience, thousands of runs coached, deep knowledge of pattern mechanics and horse behavior. You speak directly and practically.
 
-No video is available. Coach based on run data and rider notes only. Be upfront that you are working without video, but still give your most useful coaching read based on what the rider has shared.
+No video is available for this run. You are coaching ${riderName} on ${horseName} based on their run data, their own feedback notes, and their full run history. A good coach can still deliver real value without video — use everything you have.
 
-Use proper barrel racing terminology naturally:
-- Rate, pocket, drive, shoulder control, lead changes, collection, run-down
-- First barrel, second barrel, third barrel
-- Home, alley
+CRITICAL RULES:
+- Acknowledge once that no video is available, then move past it immediately
+- Use the rider's own words from their feedback — if they said they felt late to the first barrel, address THAT specifically
+- Use the historical data to give context — if this was their best time, say so. If they're trending slower, say so.
+- Use proper barrel racing terminology: rate, pocket, drive, collection, lead, shoulder, run-down, alley, home
+- Address each barrel by name — first barrel, second barrel, third barrel
+- Be direct and specific. No filler.
+- "bestBarrel" and "bestTurn": "1st", "2nd", or "3rd" — make your best educated guess from available data
+- "focusNext": ONE specific coaching cue
+- "speedInsight": Where is time likely being lost based on their notes and history?
+- "splitAnalysis": Without video splits, give your read based on their time, placing, and notes
+- "patternNotes": Based on their notes and history, what pattern issues are likely?
+- 2-4 items in strengths/issues/workOns/drills — specific and actionable
+- Return ONLY valid JSON. No markdown. No extra text.
 
-Rules:
-- Be direct and specific based on the rider's notes and run data
-- If the rider mentioned something specific, address it by name
-- Be honest that no video was available but don't dwell on it
-- Summary: 2-3 punchy sentences like you're talking at the gate
-- "bestBarrel" and "bestTurn" must be exactly: "1st", "2nd", or "3rd"
-- "focusNext" — one specific coaching cue
-- "speedInsight" — where is this run likely losing time based on data and notes?
-- "accuracyNotes" — honest note about coaching without video
-- 2-3 items each in strengths/issues/workOns/drills
-- Return ONLY valid JSON. No markdown. No backticks.
-
-Run data:
-- Horse: ${run?.horse || "not provided"}
-- Time: ${run?.time || "not provided"} seconds
+THIS RUN DATA:
+- Horse: ${horseName}
+- Official time: ${run?.time || "not provided"} seconds
 - Show: ${run?.showName || "not provided"}
 - Location: ${run?.location || "not provided"}
 - Arena condition: ${run?.arenaCondition || "not provided"}
 - Placing: ${run?.placing || "not provided"}
-- Earnings: ${run?.earnings || "not provided"}
-- Rider feedback: ${run?.riderFeedback || "none"}
-- Notes: ${run?.notes || "none"}
+- Earnings: $${run?.earnings || "0"}
+- Rider's own feedback: "${run?.riderFeedback || "none"}"
+- Additional notes: "${run?.notes || "none"}"
 
-Return ONLY valid JSON:
+${historicalContext}
+
+Return ONLY this JSON structure with no extra text:
 
 {
-  "summary": "Direct 2-3 sentence coaching read based on run data and rider notes.",
+  "summary": "2-3 sentences. Direct gate-side coaching voice. What this run tells you and what matters most.",
   "bestBarrel": "1st",
   "bestTurn": "2nd",
-  "focusNext": "Rate earlier and give more pocket at the first barrel",
-  "speedInsight": "Based on your notes, the first barrel approach is where this run is likely losing the most time.",
-  "accuracyNotes": "Coaching based on your notes and run data only — no video was available.",
-  "strengths": ["Solid time suggests good overall pace", "Making the check shows competitive conditioning"],
-  "issues": ["Rider noted feeling late to the first barrel", "Any shoulder drop at the second costs time in the crossover"],
-  "workOns": ["Identify your rate point to the first barrel and be consistent hitting it", "Film practice runs so you can see what your approach angles actually look like"],
-  "drills": ["Trot your pattern focusing on where you are rating", "Practice your run-down to the first barrel focusing on a consistent approach angle"]
+  "focusNext": "The single most important coaching cue for next time",
+  "speedInsight": "Where time is likely being lost based on notes and history",
+  "splitAnalysis": "Read of this run's time in context of their history and what that suggests about the pattern",
+  "patternNotes": "Based on notes and history, what pattern tendencies or issues are likely showing up",
+  "accuracyNotes": "Honest note that this is based on run data and rider notes only — no video available",
+  "strengths": ["Specific strength 1", "Specific strength 2"],
+  "issues": ["Specific issue 1", "Specific issue 2"],
+  "workOns": ["Specific work-on 1", "Specific work-on 2"],
+  "drills": ["Specific drill 1", "Specific drill 2"]
 }
   `.trim();
 }
@@ -577,6 +696,8 @@ function sanitizeAnalysis(parsed) {
     bestTurn: parsed.bestTurn || null,
     focusNext: parsed.focusNext || null,
     speedInsight: parsed.speedInsight || null,
+    splitAnalysis: parsed.splitAnalysis || null,
+    patternNotes: parsed.patternNotes || null,
     accuracyNotes: parsed.accuracyNotes || null,
     strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
     issues: Array.isArray(parsed.issues) ? parsed.issues : [],
@@ -675,9 +796,11 @@ async function processVideoJob(jobId) {
     const latestJob = jobs.get(jobId);
     if (!latestJob) throw new Error("Job disappeared before AI analysis.");
 
+    // IMPROVEMENT #3: Upgraded from gpt-4o-mini to gpt-4o for significantly better
+    // coaching quality, reasoning depth, and barrel racing expertise.
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      max_tokens: 1200,
+      model: "gpt-4o",
+      max_tokens: 1800,
       messages: [{
         role: "user",
         content: [
@@ -737,9 +860,10 @@ async function processTextJob(jobId) {
     const latestJob = jobs.get(jobId);
     if (!latestJob) throw new Error("Job disappeared before AI analysis.");
 
+    // IMPROVEMENT #3: Upgraded from gpt-4o-mini to gpt-4o
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      max_tokens: 1200,
+      model: "gpt-4o",
+      max_tokens: 1800,
       messages: [{ role: "user", content: buildTextOnlyPrompt(latestJob.run) }],
     });
 
@@ -784,7 +908,6 @@ function startJobProcessing(job) {
 }
 
 // ─── Expired Minor Account Cleanup (runs every 6 hours) ──────────────────────
-// If a guardian hasn't responded in 7 days, delete the minor's account and data
 
 async function cleanupExpiredMinorAccounts() {
   const sevenDays = 1000 * 60 * 60 * 24 * 7;
@@ -809,7 +932,6 @@ async function cleanupExpiredMinorAccounts() {
     pendingConfirmations.delete(token);
     console.log(`[CLEANUP] Deleting expired account: ${minorEmail} (${userId})`);
 
-    // Delete Firebase Auth account
     if (adminAuth) {
       try {
         await adminAuth.deleteUser(userId);
@@ -819,7 +941,6 @@ async function cleanupExpiredMinorAccounts() {
       }
     }
 
-    // Delete Firestore data
     if (adminDb) {
       try {
         const collections = ["runs", "profile", "account", "consent"];
@@ -843,7 +964,6 @@ async function cleanupExpiredMinorAccounts() {
   console.log(`[CLEANUP] Expired account cleanup complete`);
 }
 
-// Run cleanup every 6 hours
 setInterval(() => {
   cleanupExpiredMinorAccounts().catch((err) =>
     console.error("[CLEANUP] Error:", err.message)
@@ -851,17 +971,13 @@ setInterval(() => {
 }, 1000 * 60 * 60 * 6);
 
 restoreJobs();
-
-// Restore guardian store from Firestore (async — runs in background on boot)
 restoreGuardianStore().catch((err) => console.error("[BOOT] Guardian restore failed:", err.message));
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-// Health checks
 app.get("/", (_req, res) => res.json({ ok: true, message: "Barrel Pro AI Server running", activeJobs: jobs.size }));
 app.get("/health", (_req, res) => res.json({ ok: true, message: "Barrel Pro AI Server running", activeJobs: jobs.size }));
 
-// Debug: view all jobs
 app.get("/debug/jobs", (_req, res) => {
   res.json({
     ok: true,
@@ -874,7 +990,6 @@ app.get("/debug/jobs", (_req, res) => {
   });
 });
 
-// Start a video analysis job
 app.post("/analyze-run-video/start", upload.single("video"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No video file uploaded." });
@@ -897,7 +1012,6 @@ app.post("/analyze-run-video/start", upload.single("video"), async (req, res) =>
   }
 });
 
-// Start a text-only analysis job
 app.post("/analyze-run/start", async (req, res) => {
   try {
     const run = req.body || {};
@@ -913,7 +1027,6 @@ app.post("/analyze-run/start", async (req, res) => {
   }
 });
 
-// Poll job status
 app.get("/analysis-status/:jobId", (req, res) => {
   const jobId = String(req.params.jobId || "").trim();
   console.log("[POLL]", jobId, "exists:", jobs.has(jobId), "total:", jobs.size);
@@ -942,7 +1055,7 @@ app.get("/analysis-status/:jobId", (req, res) => {
   });
 });
 
-// ─── Guardian Email (Parental Consent + Confirmation) ─────────────────────────
+// ─── Guardian Routes ──────────────────────────────────────────────────────────
 
 app.post("/send-guardian-email", async (req, res) => {
   try {
@@ -955,11 +1068,7 @@ app.post("/send-guardian-email", async (req, res) => {
     const token = `${userId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     pendingConfirmations.set(token, {
-      userId,
-      minorEmail,
-      guardianEmail,
-      guardianName,
-      createdAt: Date.now(),
+      userId, minorEmail, guardianEmail, guardianName, createdAt: Date.now(),
     });
     persistGuardianStore();
 
@@ -978,42 +1087,17 @@ app.post("/send-guardian-email", async (req, res) => {
           <p>A Barrel Pro account was created for a user under 18 with you listed as parent or guardian.</p>
           <p><strong>Your child cannot access the app until you confirm below.</strong></p>
           <div style="text-align: center; margin: 32px 0; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap;">
-            <a href="${confirmUrl}"
-              style="background: #1ecad3; color: #fff; padding: 16px 32px; border-radius: 8px;
-                     text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block; margin: 8px;">
-              ✅ Approve Account
-            </a>
-            <a href="${rejectUrl}"
-              style="background: #b91c1c; color: #fff; padding: 16px 32px; border-radius: 8px;
-                     text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block; margin: 8px;">
-              ❌ Reject & Delete Account
-            </a>
+            <a href="${confirmUrl}" style="background: #1ecad3; color: #fff; padding: 16px 32px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block; margin: 8px;">✅ Approve Account</a>
+            <a href="${rejectUrl}" style="background: #b91c1c; color: #fff; padding: 16px 32px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block; margin: 8px;">❌ Reject & Delete Account</a>
           </div>
           <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
-            <tr>
-              <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Account Email</td>
-              <td style="padding: 8px; border: 1px solid #e5e7eb;">${minorEmail}</td>
-            </tr>
-            <tr>
-              <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">User Age</td>
-              <td style="padding: 8px; border: 1px solid #e5e7eb;">${minorAge} years old</td>
-            </tr>
-            <tr>
-              <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Guardian Name</td>
-              <td style="padding: 8px; border: 1px solid #e5e7eb;">${guardianName}</td>
-            </tr>
-            <tr>
-              <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Date</td>
-              <td style="padding: 8px; border: 1px solid #e5e7eb;">${new Date().toLocaleDateString()}</td>
-            </tr>
+            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Account Email</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${minorEmail}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">User Age</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${minorAge} years old</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Guardian Name</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${guardianName}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Date</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${new Date().toLocaleDateString()}</td></tr>
           </table>
-          <p style="color: #6b7280; font-size: 13px;">
-            If you click <strong>Reject</strong>, the account and all associated data will be permanently deleted.
-            If you did not authorize this account creation, please click Reject.
-          </p>
-          <p>Questions? Contact us at
-            <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
-          </p>
+          <p style="color: #6b7280; font-size: 13px;">If you click <strong>Reject</strong>, the account and all associated data will be permanently deleted.</p>
+          <p>Questions? Contact us at <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a></p>
           <p style="color: #9ca3af; font-size: 13px;">Barrel Pro — Built for barrel racers</p>
         </div>
       `,
@@ -1027,95 +1111,40 @@ app.post("/send-guardian-email", async (req, res) => {
   }
 });
 
-// ─── Guardian Confirm Endpoint ────────────────────────────────────────────────
-
 app.get("/confirm-guardian", async (req, res) => {
   try {
     const token = String(req.query.token || "").trim();
     if (!token) {
-      return res.status(400).send(`
-        <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-          <h2 style="color:#b91c1c;">Invalid Link</h2>
-          <p>This confirmation link is invalid. Please check your email and try again.</p>
-        </div>
-      `);
+      return res.status(400).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Invalid Link</h2><p>This confirmation link is invalid.</p></div>`);
     }
 
     const record = pendingConfirmations.get(token);
     if (!record) {
-      // Token already used — check if this userId was already confirmed and show success
-      // (handles double-click on email link)
-      const alreadyConfirmed = Array.from(confirmedUsers.values()).find(
-        (u) => u.minorEmail && token.includes(u.minorEmail.split("@")[0])
-      );
-      return res.status(400).send(`
-        <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-          <h2 style="color:#1ecad3;">✅ Already Approved</h2>
-          <p>This account has already been approved. Your child can now open the app and sign in.</p>
-          <p>If your child is still having trouble signing in, please contact us at
-            <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
-          </p>
-          <p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p>
-        </div>
-      `);
+      return res.status(400).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#1ecad3;">✅ Already Approved</h2><p>This account has already been approved. Your child can now open the app and sign in.</p><p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p></div>`);
     }
 
-    confirmedUsers.set(record.userId, {
-      confirmedAt: new Date().toISOString(),
-      minorEmail: record.minorEmail,
-    });
+    confirmedUsers.set(record.userId, { confirmedAt: new Date().toISOString(), minorEmail: record.minorEmail });
     pendingConfirmations.delete(token);
     persistGuardianStore();
 
     console.log("[GUARDIAN CONFIRMED] userId:", record.userId);
-
-    return res.send(`
-      <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-        <h2 style="color:#1ecad3;">✅ Account Approved!</h2>
-        <p>Your child's Barrel Pro account has been approved.</p>
-        <p>They can now open the app and log in.</p>
-        <p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p>
-      </div>
-    `);
+    return res.send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#1ecad3;">✅ Account Approved!</h2><p>Your child's Barrel Pro account has been approved. They can now open the app and log in.</p><p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p></div>`);
   } catch (err) {
     console.error("[GUARDIAN CONFIRM ERROR]", err.message);
-    return res.status(500).send(`
-      <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-        <h2 style="color:#b91c1c;">Something Went Wrong</h2>
-        <p>Please try clicking the link again or contact us at
-          <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
-        </p>
-      </div>
-    `);
+    return res.status(500).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Something Went Wrong</h2><p>Please try clicking the link again or contact us at <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a></p></div>`);
   }
 });
-
-// ─── Guardian Reject Endpoint (FIX 7 + 12) ───────────────────────────────────
-// When parent clicks Reject: deletes Firebase Auth account + Firestore data
 
 app.get("/reject-guardian", async (req, res) => {
   try {
     const token = String(req.query.token || "").trim();
     if (!token) {
-      return res.status(400).send(`
-        <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-          <h2 style="color:#b91c1c;">Invalid Link</h2>
-          <p>This rejection link is invalid. Please check your email and try again.</p>
-        </div>
-      `);
+      return res.status(400).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Invalid Link</h2><p>This rejection link is invalid.</p></div>`);
     }
 
     const record = pendingConfirmations.get(token);
     if (!record) {
-      return res.status(400).send(`
-        <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-          <h2 style="color:#b91c1c;">Link Expired or Already Used</h2>
-          <p>This link has already been used or has expired.</p>
-          <p>If you need assistance, contact us at
-            <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
-          </p>
-        </div>
-      `);
+      return res.status(400).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Link Expired or Already Used</h2><p>Contact us at <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a></p></div>`);
     }
 
     const { userId, minorEmail } = record;
@@ -1125,19 +1154,11 @@ app.get("/reject-guardian", async (req, res) => {
 
     console.log("[GUARDIAN REJECTED] userId:", userId, "email:", minorEmail);
 
-    // Delete Firebase Auth account
     if (adminAuth) {
-      try {
-        await adminAuth.deleteUser(userId);
-        console.log("[REJECT] Deleted Firebase Auth user:", userId);
-      } catch (err) {
-        console.error("[REJECT] Could not delete Firebase Auth user:", err.message);
-      }
-    } else {
-      console.warn("[REJECT] Firebase Admin not initialized — Auth user not deleted");
+      try { await adminAuth.deleteUser(userId); console.log("[REJECT] Deleted Firebase Auth user:", userId); }
+      catch (err) { console.error("[REJECT] Could not delete Firebase Auth user:", err.message); }
     }
 
-    // Delete Firestore data
     if (adminDb) {
       try {
         const collections = ["runs", "profile", "account", "consent"];
@@ -1147,43 +1168,18 @@ app.get("/reject-guardian", async (req, res) => {
             const batch = adminDb.batch();
             snapshot.docs.forEach((d) => batch.delete(d.ref));
             if (!snapshot.empty) await batch.commit();
-            console.log(`[REJECT] Deleted Firestore collection users/${userId}/${col}`);
-          } catch (colErr) {
-            console.warn(`[REJECT] Could not delete collection ${col}:`, colErr.message);
-          }
+          } catch { /* silent */ }
         }
-        // Delete the user document itself
         await adminDb.doc(`users/${userId}`).delete();
-        console.log("[REJECT] Deleted Firestore user document:", userId);
-      } catch (err) {
-        console.error("[REJECT] Firestore cleanup error:", err.message);
-      }
-    } else {
-      console.warn("[REJECT] Firebase Admin not initialized — Firestore data not deleted");
+      } catch (err) { console.error("[REJECT] Firestore cleanup error:", err.message); }
     }
 
-    return res.send(`
-      <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-        <h2 style="color:#b91c1c;">Account Rejected</h2>
-        <p>The Barrel Pro account for <strong>${minorEmail}</strong> has been rejected and permanently deleted.</p>
-        <p>All associated data has been removed from our servers.</p>
-        <p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p>
-      </div>
-    `);
+    return res.send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Account Rejected</h2><p>The Barrel Pro account for <strong>${minorEmail}</strong> has been rejected and permanently deleted.</p><p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p></div>`);
   } catch (err) {
     console.error("[GUARDIAN REJECT ERROR]", err.message);
-    return res.status(500).send(`
-      <div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;">
-        <h2 style="color:#b91c1c;">Something Went Wrong</h2>
-        <p>Please try again or contact us at
-          <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a>
-        </p>
-      </div>
-    `);
+    return res.status(500).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Something Went Wrong</h2><p>Contact us at <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a></p></div>`);
   }
 });
-
-// ─── Check Guardian Status (app polls this at login) ─────────────────────────
 
 app.get("/guardian-status/:userId", (req, res) => {
   const userId = String(req.params.userId || "").trim();
@@ -1201,9 +1197,7 @@ app.get("/guardian-status/:userId", (req, res) => {
 
 app.use((err, _req, res, _next) => {
   if (err instanceof multer.MulterError) {
-    if (err.code === "LIMIT_FILE_SIZE") {
-      return res.status(400).json({ error: "Video is too large. Max size is 250MB." });
-    }
+    if (err.code === "LIMIT_FILE_SIZE") return res.status(400).json({ error: "Video is too large. Max size is 250MB." });
     return res.status(400).json({ error: err.message || "Upload failed." });
   }
   if (err) return res.status(400).json({ error: err.message || "Request failed." });
