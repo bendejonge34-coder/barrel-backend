@@ -17,7 +17,7 @@ const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 3001);
 const EXEC_MAX_BUFFER = 1024 * 1024 * 50;
-const PYTHON_TIMEOUT_MS = 1000 * 60 * 8;
+const PYTHON_TIMEOUT_MS = 1000 * 60 * 12;
 const JOB_TTL_MS = 1000 * 60 * 60;
 const POLL_INTERVAL_MS = 2000;
 
