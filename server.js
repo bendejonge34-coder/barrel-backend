@@ -389,20 +389,61 @@ async function runPythonAnalysis(videoPath, run = {}) {
 }
 
 // ─── Frame Selection ──────────────────────────────────────────────────────────
+// Smart strategic 30-frame selection targeting the most important moments:
+// alley approach, barrel approaches, apexes, exits, and home run.
 
-function selectFramePaths(sampledFrames, maxFrames = 4) {
+function selectFramePaths(sampledFrames, maxFrames = 30) {
   const usable = (sampledFrames || [])
     .filter((f) => f?.read_success && (f?.overlay_image_path || f?.image_path))
-    .map((f) => f.overlay_image_path || f.image_path)
-    .filter(Boolean);
+    .map((f) => ({
+      path: f.overlay_image_path || f.image_path,
+      percent: f.percent ?? 0,
+      dense: !!f.dense_pass,
+    }))
+    .filter((f) => f.path);
 
-  if (usable.length <= maxFrames) return usable;
+  if (usable.length === 0) return [];
+  if (usable.length <= maxFrames) return usable.map((f) => f.path);
 
-  const selected = [];
-  for (let i = 0; i < maxFrames; i++) {
-    selected.push(usable[Math.round((i * (usable.length - 1)) / (maxFrames - 1))]);
+  // Strategic zones as % of run — each zone gets a frame allocation
+  const zones = [
+    { min: 0.00, max: 0.15, count: 2 },  // alley
+    { min: 0.13, max: 0.28, count: 3 },  // barrel 1 approach
+    { min: 0.26, max: 0.38, count: 4 },  // barrel 1 apex
+    { min: 0.36, max: 0.44, count: 2 },  // barrel 1 exit
+    { min: 0.40, max: 0.52, count: 3 },  // barrel 2 approach
+    { min: 0.50, max: 0.60, count: 4 },  // barrel 2 apex
+    { min: 0.58, max: 0.65, count: 2 },  // barrel 2 exit
+    { min: 0.62, max: 0.74, count: 3 },  // barrel 3 approach
+    { min: 0.72, max: 0.82, count: 4 },  // barrel 3 apex
+    { min: 0.80, max: 0.88, count: 2 },  // barrel 3 exit
+    { min: 0.86, max: 1.00, count: 1 },  // home run
+  ];
+
+  const selected = new Set();
+
+  for (const zone of zones) {
+    const inZone = usable.filter((f) => f.percent >= zone.min && f.percent <= zone.max);
+    if (inZone.length === 0) continue;
+    const dense = inZone.filter((f) => f.dense);
+    const pool = dense.length > 0 ? dense : inZone;
+    const count = Math.min(zone.count, pool.length);
+    for (let i = 0; i < count; i++) {
+      const idx = Math.round((i * (pool.length - 1)) / Math.max(count - 1, 1));
+      selected.add(pool[idx].path);
+    }
   }
-  return [...new Set(selected)];
+
+  // Fill remaining slots with evenly spaced frames
+  if (selected.size < maxFrames) {
+    const remaining = maxFrames - selected.size;
+    for (let i = 0; i < remaining; i++) {
+      const idx = Math.round((i * (usable.length - 1)) / Math.max(remaining - 1, 1));
+      selected.add(usable[idx].path);
+    }
+  }
+
+  return [...selected].slice(0, maxFrames);
 }
 
 function buildImageInputs(framePaths) {
@@ -511,73 +552,112 @@ Recent rider feedback and notes:
 
 // ─── AI Prompts ───────────────────────────────────────────────────────────────
 
+// ── Barrel Racing Knowledge Base ─────────────────────────────────────────────
+// Expert coaching knowledge injected into every prompt so the AI coaches
+// like a professional with deep barrel racing expertise.
+
+const BARREL_RACING_KNOWLEDGE_BASE = `
+=== BARREL RACING COACHING KNOWLEDGE BASE ===
+You have internalized the following expert knowledge. Apply it to every analysis.
+
+── THE IDEAL LINE & APPROACH ──────────────────────────────────────────────────
+
+APPROACH ANGLE — Never run straight at a barrel. A straight approach forces a sharp jerky turn that kills momentum and causes the horse to shoulder the barrel. The ideal path is a "J" shape — arcing toward a point 5-8 feet to the side of the barrel before beginning the turn. Think of it as aiming slightly past the barrel, then letting the arc bring you around it.
+
+THE POCKET — The space between horse and barrel during the turn. Keep 4-6 feet of lateral clearance on the approach. Too tight (2 feet or less) causes the hind end to swing out and hit the barrel on the backside, or the horse pops their front end to get around it. Too wide wastes time. The horse's entire body — nose to tail — must fit cleanly around the arc.
+
+THE RATE POINT — Rate (shift weight from front end to hocks) when the horse's nose is even with the barrel. Sit deep in the saddle, stop driving with your legs, apply a slight command rein. This causes the horse to break at the poll and gather their stride. Rate too early = lose speed. Rate too late = go long (overshoot the turn). "Going long" at any barrel is one of the biggest time killers in the sport.
+
+THE TURN — Keep the horse's inside shoulder UP. A dropped inside shoulder causes the horse to "slice" the turn — losing the arc and running into the barrel. Aim to have your leg (cinch) pass the barrel before asking for full commitment to the turn. Once your leg clears the barrel, look toward the next barrel immediately. The horse follows your eyes.
+
+── HORSE BODY MECHANICS ───────────────────────────────────────────────────────
+
+INSIDE SHOULDER — Must stay elevated through the entire turn. If the inside shoulder drops, the horse slices, loses the arc, and is likely to knock the barrel. Look for shoulder drop in the frames.
+
+HINDQUARTER ENGAGEMENT — The horse should pivot and push from the hind end, not pull themselves around with the front legs. Good collection means weight shifts to the hocks. Watch for whether the horse is "driving" out of the turn with their hindquarters or just shuffling forward.
+
+COLLECTION vs EXTENSION — Collection before the barrel (weight back, hocks under), extension between barrels (full stride, driving forward). Horses that never collect run past the pocket. Horses that never extend lose time on the straight runs.
+
+EXIT DRIVE — After clearing each barrel, the horse should immediately accelerate. A horse that "drifts" or coasts out of a turn is losing significant time. You want to see the horse's hind end engage and push hard within 2-3 strides of the apex.
+
+HEAD POSITION — A horse with their head up and nose out is on their forehand and cannot collect properly. A horse breaking at the poll with a soft jaw is correctly rated. Watch for head carriage in the frames.
+
+LEAD CHANGES — The horse should be on the correct lead for each turn. Incorrect leads cause the horse to fall in or out of the arc. This is visible in the video frames if the horse's front legs are visible.
+
+── RIDER BODY MECHANICS ───────────────────────────────────────────────────────
+
+THE "MOTORCYCLE LEAN" — The most common mistake. Leaning your upper body into the barrel feels natural but actually shifts weight to the horse's inside shoulder, causing them to dive and slice the turn. Knocking barrels is the direct result. The fix: keep your spine aligned with the horse's spine. Weight should be centered or on the outside stirrup. This allows the horse to pick up its inside shoulder and snap around the turn.
+
+SITTING DOWN TO RATE — When the horse's nose reaches the barrel, the rider must sit deep — "pockets in the dirt." Staying in a forward racing position keeps weight on the front end, making the horse heavy and prone to blowing the turn. Sitting deep is a physical cue to the horse to engage the hind end.
+
+GETTING LEFT BEHIND — Leaning back when the horse accelerates out of a turn or down the alley puts the rider behind the motion. This puts pressure on the horse's mouth and back. On the straight runs, the rider should be slightly forward in a "power position" to allow the horse to extend fully.
+
+THE DEATH GRIP ON REINS — Pulling too hard on the inside rein pops the horse's ribs to the outside, loses the arc, and causes loss of footing. Keep a soft hand — guide the nose, use the outside rein to keep the horse framed. Barrel racing is more leg and body weight than rein steering.
+
+HUNTING THE HORN — Grabbing the saddle horn before completing the rate tips the rider's chest forward and down, pushing the horse's nose into the barrel. Correct sequence: sit deep FIRST, then use the horn as an anchor to stay deep in the saddle during the snap of the turn.
+
+BUSY LEGS — Legs swinging or washing out creates white noise the horse ignores. Worse, if the inside leg is constantly pushing during the turn, it tells the horse to move away from the barrel. The legs should be a frame: outside leg behind the cinch controls the hindquarters, inside leg quiet unless needed to lift the shoulder.
+
+EYES — Look at the entry point (pocket) on approach. The moment the horse's nose clears the barrel, snap your head to the next barrel. Your body follows your eyes, and the horse follows your body. Staring at the barrel causes the rider to lean in and the horse to go into it.
+
+── SPLIT TIME INTERPRETATION ──────────────────────────────────────────────────
+
+SLOW ALLEY-TO-FIRST — Late to the first barrel. Check: approach angle too straight, wrong rate point, or horse not rated at all. This is the setup for the entire run.
+
+SLOW FIRST-TO-SECOND or SECOND-TO-THIRD — Horse not driving between barrels. Check: rider sitting back on the straightaway (getting left behind), horse not extending, or horse still mentally in "rate mode" and not switched back to drive.
+
+SLOW THIRD-TO-HOME — Horse not rated out of the third barrel, tired, or rider sitting back and not pushing. After the third barrel, the horse needs to be immediately pushed for home. Any hesitation costs significant time.
+
+A SLOW SINGLE SPLIT COMPARED TO OTHERS — Points directly to a problem at that specific barrel. Check the turn grade, approach angle, and exit drive data for that barrel.
+
+── COMMON PROBLEMS & ROOT CAUSES ──────────────────────────────────────────────
+
+Running past the pocket → approach angle too straight, turned too early
+Knocking barrel on front → turned too early, horse's nose in the barrel
+Knocking barrel on back → hind end swung out, pocket too tight on approach
+Blowing the turn (going wide) → failed to rate, stayed in forward position too long
+Slicing the turn → inside shoulder dropped, motorcycle lean from rider
+Losing drive out of turn → rider got left behind, horse not engaging hind end
+Hesitation at barrel → horse anticipating the rate and shutting down early
+Weak alley run → horse not extended, rider not in power position, too much rein contact
+`;
+
 function buildBarrelCoachingData(run, pythonResult) {
   const barrelMetrics = pythonResult?.barrel_metrics || {};
   const speedSummary = pythonResult?.speed_summary || null;
   const splits = pythonResult?.splits || {};
-  const turns = pythonResult?.turns || {};
   const insights = Array.isArray(pythonResult?.insights) ? pythonResult.insights : [];
-
   const barrelLabels = { barrel1: "First", barrel2: "Second", barrel3: "Third" };
-  
-  // Build detailed per-barrel coaching report
+
   const barrelReport = ["barrel1", "barrel2", "barrel3"].map(name => {
     const bm = barrelMetrics[name];
     const label = barrelLabels[name];
     if (!bm || !bm.detected) return `${label} barrel: not detected in video`;
-    
     const tightness = bm.turn_tightness || {};
     const approach = bm.approach || {};
     const exitDrive = bm.exit_drive || null;
     const knocked = bm.potential_knockdown;
-    
     const lines = [`${label} barrel:`];
-    
-    // Turn tightness with grade
-    if (tightness.grade) {
-      lines.push(`  - Turn tightness: Grade ${tightness.grade} (${tightness.label}) — ${tightness.coaching_note}`);
-      if (tightness.min_distance_px !== null) {
-        lines.push(`  - Closest approach: ${tightness.min_distance_px}px from barrel center`);
-      }
-    }
-    
-    // Approach angle
-    if (approach.angle_degrees !== null && approach.angle_degrees !== undefined) {
-      lines.push(`  - Approach angle: ${approach.angle_degrees}° (ideal: 20-40°) — ${approach.coaching_note}`);
-    }
-    
-    // Exit drive
+    if (tightness.grade) lines.push(`  - Turn tightness: Grade ${tightness.grade} (${tightness.label}) — ${tightness.coaching_note}`);
+    if (tightness.min_distance_px !== null && tightness.min_distance_px !== undefined) lines.push(`  - Closest approach: ${tightness.min_distance_px}px from barrel center`);
+    if (approach.angle_degrees !== null && approach.angle_degrees !== undefined) lines.push(`  - Approach angle: ${approach.angle_degrees}° (ideal: 20-40°) — ${approach.coaching_note}`);
     if (exitDrive) {
       lines.push(`  - Exit drive: ${exitDrive.coaching_note}`);
       if (exitDrive.apex_speed_px_per_sec && exitDrive.exit_speed_px_per_sec) {
         const ratio = exitDrive.acceleration_ratio;
-        lines.push(`  - Speed at turn: ${exitDrive.apex_speed_px_per_sec}px/s → exit: ${exitDrive.exit_speed_px_per_sec}px/s (${ratio >= 1.0 ? "+" : ""}${((ratio - 1) * 100).toFixed(0)}% change)`);
+        lines.push(`  - Speed at turn: ${exitDrive.apex_speed_px_per_sec}px/s → exit: ${exitDrive.exit_speed_px_per_sec}px/s (${ratio >= 1.0 ? "+" : ""}${((ratio - 1) * 100).toFixed(0)}%)`);
       }
     }
-    
-    // Knockdown flag
-    if (knocked) {
-      lines.push(`  - ⚠️ POSSIBLE KNOCKDOWN DETECTED (confidence: ${Math.round((bm.knockdown_confidence || 0) * 100)}%) — ${bm.knockdown_note || "barrel movement detected"}`);
-    }
-    
-    // Summary tags
-    if (bm.summary_tags && bm.summary_tags.length > 0) {
-      lines.push(`  - Pattern tags: ${bm.summary_tags.join(", ")}`);
-    }
-    
+    if (knocked) lines.push(`  - ⚠️ POSSIBLE KNOCKDOWN DETECTED (confidence: ${Math.round((bm.knockdown_confidence || 0) * 100)}%)`);
+    if (bm.summary_tags && bm.summary_tags.length > 0) lines.push(`  - Tags: ${bm.summary_tags.join(", ")}`);
     return lines.join("\n");
   }).join("\n\n");
 
-  // Speed analysis
   let speedReport = "Speed data: not available";
   if (speedSummary) {
     const lines = ["Run speed profile:"];
-    if (speedSummary.slowest_section_label) {
-      lines.push(`  - SLOWEST section: ${speedSummary.slowest_section_label} — this is where the most time is being lost`);
-    }
-    if (speedSummary.fastest_section_label) {
-      lines.push(`  - Fastest section: ${speedSummary.fastest_section_label}`);
-    }
+    if (speedSummary.slowest_section_label) lines.push(`  - SLOWEST section: ${speedSummary.slowest_section_label}`);
+    if (speedSummary.fastest_section_label) lines.push(`  - Fastest section: ${speedSummary.fastest_section_label}`);
     if (speedSummary.section_speeds) {
       const s = speedSummary.section_speeds;
       lines.push(`  - Alley→1st: ${s.alley_to_barrel1 ?? "n/a"}px/s | 1st→2nd: ${s.barrel1_to_barrel2 ?? "n/a"}px/s | 2nd→3rd: ${s.barrel2_to_barrel3 ?? "n/a"}px/s | 3rd→Home: ${s.barrel3_to_home ?? "n/a"}px/s`);
@@ -585,7 +665,6 @@ function buildBarrelCoachingData(run, pythonResult) {
     speedReport = lines.join("\n");
   }
 
-  // Split times
   const splitsMethod = splits?.splits_method || "unknown";
   const splitReport = `Split times (method: ${splitsMethod}):
   - Alley to first barrel: ${splits?.start_to_barrel1_seconds ?? "n/a"}s
@@ -599,7 +678,6 @@ function buildBarrelCoachingData(run, pythonResult) {
 Run overview:
 - Duration: ${pythonResult?.duration_seconds ?? "unknown"}s | Pattern: ${pythonResult?.pattern_direction ?? "unknown"}-first
 - Horse tracked: ${pythonResult?.horse_detected_frames ?? "?"} frames | Frames analyzed: ${pythonResult?.tracking_quality?.sampled_frame_count ?? "?"}
-- Video: ${pythonResult?.width ?? "?"}x${pythonResult?.height ?? "?"}
 
 ${splitReport}
 
@@ -621,6 +699,7 @@ Run data:
 - Earnings: $${run?.earnings || "0"}
 - Rider felt: "${run?.riderFeedback || "no feedback provided"}"
 - Notes: "${run?.notes || "none"}"
+- Manual splits set: ${run?.manualSplits ? "YES — user-marked splits are highly accurate" : "No"}
   `.trim();
 }
 
@@ -631,46 +710,68 @@ function buildVideoPrompt(run, pythonResult) {
   const riderName = run?.rider || "the rider";
 
   return `
-You are an elite barrel racing coach — a seasoned NFR competitor, trainer, and analyst who has watched thousands of runs. You speak directly, use proper barrel racing terminology, and give advice that actually helps riders go faster.
+${BARREL_RACING_KNOWLEDGE_BASE}
 
-You have detailed computer vision data from ${riderName}'s run on ${horseName}, including per-barrel turn grades, approach angles, speed profiles, exit drive analysis, and potential knockdown flags. Use ALL of this data. Do not give generic advice — every coaching note must connect directly to what the data shows.
+=== YOUR TASK ===
+
+You are analyzing ${riderName}'s run on ${horseName}. You have 30 video frames covering the entire run — alley approach, all three barrel approaches, apexes, exits, and the home run. You also have detailed computer vision data.
+
+WHAT TO LOOK FOR IN THE FRAMES — check every frame carefully:
+
+RIDER POSITION:
+- Is the rider sitting deep (pockets in the saddle) at the rate point, or still standing in the stirrups?
+- Is the rider leaning into the barrel (motorcycle lean) or staying centered/spine-aligned?
+- Are the rider's hands quiet and low, or up near the chin pulling?
+- Is the rider in a forward power position on the straightaways, or leaning back?
+- Is the rider looking at the barrel (bad) or looking ahead to the next one (good)?
+- Is the rider grabbing the horn before completing the rate?
+
+HORSE POSITION:
+- Is the inside shoulder up or dropped through the turns?
+- Is the horse's head up with nose out (on the forehand) or breaking at the poll (collected)?
+- Is the horse driving hard out of each barrel with hindquarter engagement, or drifting?
+- Is the horse on the correct lead for each turn?
+- Does the horse look balanced and collected approaching each barrel, or strung out?
+
+BARREL PROXIMITY:
+- Is the horse running too wide (losing time) or dangerously tight?
+- Did any barrel appear disturbed or moved?
 
 COACHING RULES:
-- Sound like a real barrel racing coach standing at the gate, not a sports AI
-- Use proper terminology naturally: rate point, pocket, drive, collection, two-tracking, over-running, shoulder drop, lead change, run-down, alley, home
-- Call each barrel by name: first barrel, second barrel, third barrel — never "barrel 1"
-- If the data shows a Grade D or F turn, say it plainly: "You're running wide at the second barrel — that's costing you time"
-- If a knockdown was detected, address it directly
-- If approach angle is "too_straight", explain what that means: the horse will blow past the pocket
-- If exit drive shows "drifted", explain: the horse isn't pushing forward out of the turn
-- The slowest split section IS where the time is going — name it specifically
-- Compare barrel grades to each other: "Your third barrel (Grade A) was your best turn — your second (Grade D) is costing you the most time"
-- If rider left feedback, address it by name
+- Use the knowledge base above — sound like a real barrel racing professional
+- Reference what you actually SEE in the frames, not what you assume
+- Use specific barrel racing language: rate point, pocket, collection, drive, two-tracking, shoulder drop, on the forehand, breaking at the poll, motorcycle lean, power position, snap the turn
+- Call barrels by name: first barrel, second barrel, third barrel
+- If data shows a Grade D or F turn — say it plainly and explain why based on the knowledge base
+- If the rider is leaning in (motorcycle lean) and you can see it in the frames — call it out by name
+- If the horse's inside shoulder is dropped — explain what that costs them
+- Compare the three barrels — which was cleanest, which needs work
+- If manual splits were set, they are highly accurate — use them as ground truth
 - Every drill must connect to a specific observed problem
-- NO generic advice. Every sentence earns its place.
+- NO generic advice. Every sentence must be useful.
 - "bestBarrel" and "bestTurn" must be exactly: "1st", "2nd", or "3rd"
-- "focusNext": ONE specific coaching cue — the single highest-priority fix
 - Return ONLY valid JSON. No markdown. No extra text.
 
 ${coachingData}
 
 ${historicalContext}
 
-Return ONLY this exact JSON structure:
+Return ONLY this exact JSON:
 
 {
-  "summary": "2-3 punchy sentences at the gate. Lead with the most important finding from the data. Reference specific barrels and grades.",
+  "summary": "2-3 punchy sentences at the gate. Lead with the single most important finding. Reference the specific barrel and what you saw. Sound like a real coach.",
   "bestBarrel": "1st",
   "bestTurn": "2nd",
-  "focusNext": "One specific, actionable coaching cue tied directly to the data",
-  "speedInsight": "Name the slowest section and explain why based on speed profile and turn grades",
-  "splitAnalysis": "Read each split in context — which was strongest, which cost time, what it tells you about the pattern",
-  "patternNotes": "What the approach angles, tightness grades, and exit drives tell you about how this horse runs the pattern",
-  "accuracyNotes": "Honest note on data quality — what you could see clearly vs what was estimated",
-  "strengths": ["Specific strength tied to data — mention grade or measurement", "Another specific strength"],
-  "issues": ["Specific issue with barrel name and grade — e.g. Wide approach at the second barrel (Grade D, 87px) — running past the pocket", "Another specific issue"],
-  "workOns": ["Specific work-on tied to observed problem", "Another specific work-on"],
-  "drills": ["Specific drill that directly addresses an observed issue", "Another targeted drill"]
+  "focusNext": "One specific actionable coaching cue — the highest priority fix",
+  "speedInsight": "Name the slowest section and explain what the data tells you about why",
+  "splitAnalysis": "Read each split time using the knowledge base — what does each split tell you about what happened at that barrel",
+  "patternNotes": "What the approach angles, tightness grades, and exit drives tell you about how this horse runs the pattern — use proper terminology",
+  "visualObservations": "What you specifically saw in the video frames — rider position, horse shoulder, hands, seat, head position. Reference what you actually saw.",
+  "accuracyNotes": "Honest note on data quality and what you could see clearly vs what was estimated",
+  "strengths": ["Specific strength tied to data or what you saw in frames", "Another specific strength with detail"],
+  "issues": ["Specific issue with barrel name, grade, and visual observation — e.g. Motorcycle lean at the second barrel — rider's upper body clearly leaning in, dropping the horse's inside shoulder (Grade D turn, 87px wide)", "Another specific issue with detail"],
+  "workOns": ["Specific work-on tied to an observed problem with proper terminology", "Another targeted work-on"],
+  "drills": ["Specific drill that directly addresses an observed issue — e.g. Walk and trot the pattern focusing on sitting deep the moment your horse's nose hits the barrel", "Another targeted drill tied to what you saw"]
 }
   `.trim();
 }
@@ -681,19 +782,19 @@ function buildTextOnlyPrompt(run) {
   const riderName = run?.rider || "the rider";
 
   return `
-You are an elite barrel racing coach with NFR-level experience and thousands of runs coached. You speak directly, practically, and with real expertise.
+${BARREL_RACING_KNOWLEDGE_BASE}
 
-No video is available for this run. Coach ${riderName} on ${horseName} using their run data, their own feedback, and their full history. A great coach delivers real value with or without video.
+=== YOUR TASK ===
+
+No video available. Coach ${riderName} on ${horseName} using their run data, their own feedback, and their history. Apply the knowledge base above — sound like a real barrel racing professional.
 
 RULES:
-- Acknowledge once that there's no video, then move on immediately — don't dwell on it
-- Address the rider's own words directly. If they said "felt late to the first barrel" — coach that specific thing
-- Use the history: if this was a personal best, say so. If they're trending slower, say so.
-- Use proper terminology: rate, pocket, drive, collection, shoulder, run-down, alley, home
-- Call barrels by name: first barrel, second barrel, third barrel
-- Every sentence must be useful — no filler, no generic encouragement
+- Acknowledge once that there's no video, then move on immediately
+- Address the rider's own feedback directly using proper terminology from the knowledge base
+- Use history context — personal best, trend, arena conditions
+- Reference the knowledge base when explaining problems — use real barrel racing language
+- Every sentence must be useful
 - "bestBarrel" and "bestTurn" must be exactly: "1st", "2nd", or "3rd"
-- "focusNext": ONE specific coaching cue
 - Return ONLY valid JSON. No markdown. No extra text.
 
 THIS RUN:
@@ -712,21 +813,23 @@ ${historicalContext}
 Return ONLY this JSON:
 
 {
-  "summary": "2-3 sentences at the gate. Reference rider's own feedback and history context.",
+  "summary": "2-3 sentences at the gate. Reference rider's own feedback with proper barrel racing terminology.",
   "bestBarrel": "1st",
   "bestTurn": "2nd",
-  "focusNext": "The single most important coaching cue for next time",
-  "speedInsight": "Where time is likely being lost based on notes, feedback, and history",
-  "splitAnalysis": "Read this time in context of their history — what does it suggest about the pattern",
-  "patternNotes": "Based on rider feedback and history, what pattern tendencies are likely showing up",
-  "accuracyNotes": "Honest note: coaching from rider feedback and history only, no video data available",
+  "focusNext": "The single most important coaching cue using proper terminology",
+  "speedInsight": "Where time is likely being lost — use the knowledge base to explain why",
+  "splitAnalysis": "Read this time in context of their history using knowledge base interpretation",
+  "patternNotes": "Based on rider feedback and history — what pattern tendencies are showing up, explained with proper terminology",
+  "visualObservations": "No video available — note this field is based on rider feedback only",
+  "accuracyNotes": "Coaching from rider feedback and history only — no video data",
   "strengths": ["Specific strength from feedback or history", "Another specific strength"],
-  "issues": ["Specific issue from rider's own words or history pattern", "Another specific issue"],
-  "workOns": ["Specific work-on tied to their feedback", "Another targeted work-on"],
+  "issues": ["Specific issue using proper barrel racing terminology", "Another specific issue"],
+  "workOns": ["Specific work-on with proper terminology", "Another targeted work-on"],
   "drills": ["Specific drill tied to their stated problem", "Another targeted drill"]
 }
   `.trim();
 }
+
 
 // ─── Analysis Output Sanitizer ────────────────────────────────────────────────
 
@@ -740,6 +843,7 @@ function sanitizeAnalysis(parsed) {
     splitAnalysis: parsed.splitAnalysis || null,
     patternNotes: parsed.patternNotes || null,
     accuracyNotes: parsed.accuracyNotes || null,
+    visualObservations: parsed.visualObservations || null,
     strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
     issues: Array.isArray(parsed.issues) ? parsed.issues : [],
     workOns: Array.isArray(parsed.workOns) ? parsed.workOns : [],
@@ -848,7 +952,7 @@ async function processVideoJob(jobId) {
     // coaching quality, reasoning depth, and barrel racing expertise.
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
-      max_tokens: 1800,
+      max_tokens: 2400,
       messages: [{
         role: "user",
         content: [
@@ -911,7 +1015,7 @@ async function processTextJob(jobId) {
     // IMPROVEMENT #3: Upgraded from gpt-4o-mini to gpt-4o
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
-      max_tokens: 1800,
+      max_tokens: 2400,
       messages: [{ role: "user", content: buildTextOnlyPrompt(latestJob.run) }],
     });
 
