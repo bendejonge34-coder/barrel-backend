@@ -416,8 +416,6 @@ function buildImageInputs(framePaths) {
 }
 
 // ─── Historical Context Builder ───────────────────────────────────────────────
-// IMPROVEMENT #2: Feed the AI rich historical data so it coaches like a real trainer
-// who knows this horse and rider's full history — not just this one run.
 
 function buildHistoricalContext(run) {
   const history = run?.runHistory || [];
@@ -427,7 +425,6 @@ function buildHistoricalContext(run) {
     return `No previous run history available for ${horseName}. This appears to be the first logged run.`;
   }
 
-  // Filter to runs for this same horse
   const horseRuns = history.filter(r => r.horse === horseName && r.time && !isNaN(parseFloat(r.time)));
   
   if (horseRuns.length === 0) {
@@ -513,119 +510,167 @@ Recent rider feedback and notes:
 }
 
 // ─── AI Prompts ───────────────────────────────────────────────────────────────
-// IMPROVEMENT #1: Completely rewritten prompts — expert barrel racing voice,
-// specific terminology, pattern-based coaching, and actionable feedback.
 
-function buildCvSummary(run, pythonResult) {
-  const barrels = pythonResult?.identified_barrels || {};
+function buildBarrelCoachingData(run, pythonResult) {
+  const barrelMetrics = pythonResult?.barrel_metrics || {};
+  const speedSummary = pythonResult?.speed_summary || null;
   const splits = pythonResult?.splits || {};
-  const insights = Array.isArray(pythonResult?.insights) ? pythonResult.insights.slice(0, 6) : [];
-  const splitsMethod = splits?.splits_method || "unknown";
-
-  const barrelLines = ["barrel1", "barrel2", "barrel3"].map((name, i) => {
-    const b = barrels[name];
-    const label = ["First", "Second", "Third"][i];
-    if (!b) return `${label} barrel: not detected`;
-    return `${label} barrel: center=(${b.center_x}, ${b.center_y}), detection count=${b.detection_count}`;
-  });
-
-  // Turn quality details
   const turns = pythonResult?.turns || {};
-  const turnLines = ["barrel1", "barrel2", "barrel3"].map((name, i) => {
-    const t = turns[name];
-    const label = ["First", "Second", "Third"][i];
-    if (!t) return `${label} barrel turn: no data`;
-    return `${label} barrel turn: apex_frame=${t.apex_frame ?? "n/a"}, min_distance_px=${t.min_distance_px ?? "n/a"}, entry_speed=${t.entry_speed_estimate ?? "n/a"}`;
-  });
+  const insights = Array.isArray(pythonResult?.insights) ? pythonResult.insights : [];
+
+  const barrelLabels = { barrel1: "First", barrel2: "Second", barrel3: "Third" };
+  
+  // Build detailed per-barrel coaching report
+  const barrelReport = ["barrel1", "barrel2", "barrel3"].map(name => {
+    const bm = barrelMetrics[name];
+    const label = barrelLabels[name];
+    if (!bm || !bm.detected) return `${label} barrel: not detected in video`;
+    
+    const tightness = bm.turn_tightness || {};
+    const approach = bm.approach || {};
+    const exitDrive = bm.exit_drive || null;
+    const knocked = bm.potential_knockdown;
+    
+    const lines = [`${label} barrel:`];
+    
+    // Turn tightness with grade
+    if (tightness.grade) {
+      lines.push(`  - Turn tightness: Grade ${tightness.grade} (${tightness.label}) — ${tightness.coaching_note}`);
+      if (tightness.min_distance_px !== null) {
+        lines.push(`  - Closest approach: ${tightness.min_distance_px}px from barrel center`);
+      }
+    }
+    
+    // Approach angle
+    if (approach.angle_degrees !== null && approach.angle_degrees !== undefined) {
+      lines.push(`  - Approach angle: ${approach.angle_degrees}° (ideal: 20-40°) — ${approach.coaching_note}`);
+    }
+    
+    // Exit drive
+    if (exitDrive) {
+      lines.push(`  - Exit drive: ${exitDrive.coaching_note}`);
+      if (exitDrive.apex_speed_px_per_sec && exitDrive.exit_speed_px_per_sec) {
+        const ratio = exitDrive.acceleration_ratio;
+        lines.push(`  - Speed at turn: ${exitDrive.apex_speed_px_per_sec}px/s → exit: ${exitDrive.exit_speed_px_per_sec}px/s (${ratio >= 1.0 ? "+" : ""}${((ratio - 1) * 100).toFixed(0)}% change)`);
+      }
+    }
+    
+    // Knockdown flag
+    if (knocked) {
+      lines.push(`  - ⚠️ POSSIBLE KNOCKDOWN DETECTED (confidence: ${Math.round((bm.knockdown_confidence || 0) * 100)}%) — ${bm.knockdown_note || "barrel movement detected"}`);
+    }
+    
+    // Summary tags
+    if (bm.summary_tags && bm.summary_tags.length > 0) {
+      lines.push(`  - Pattern tags: ${bm.summary_tags.join(", ")}`);
+    }
+    
+    return lines.join("\n");
+  }).join("\n\n");
+
+  // Speed analysis
+  let speedReport = "Speed data: not available";
+  if (speedSummary) {
+    const lines = ["Run speed profile:"];
+    if (speedSummary.slowest_section_label) {
+      lines.push(`  - SLOWEST section: ${speedSummary.slowest_section_label} — this is where the most time is being lost`);
+    }
+    if (speedSummary.fastest_section_label) {
+      lines.push(`  - Fastest section: ${speedSummary.fastest_section_label}`);
+    }
+    if (speedSummary.section_speeds) {
+      const s = speedSummary.section_speeds;
+      lines.push(`  - Alley→1st: ${s.alley_to_barrel1 ?? "n/a"}px/s | 1st→2nd: ${s.barrel1_to_barrel2 ?? "n/a"}px/s | 2nd→3rd: ${s.barrel2_to_barrel3 ?? "n/a"}px/s | 3rd→Home: ${s.barrel3_to_home ?? "n/a"}px/s`);
+    }
+    speedReport = lines.join("\n");
+  }
+
+  // Split times
+  const splitsMethod = splits?.splits_method || "unknown";
+  const splitReport = `Split times (method: ${splitsMethod}):
+  - Alley to first barrel: ${splits?.start_to_barrel1_seconds ?? "n/a"}s
+  - First to second barrel: ${splits?.barrel1_to_barrel2_seconds ?? "n/a"}s
+  - Second to third barrel: ${splits?.barrel2_to_barrel3_seconds ?? "n/a"}s
+  - Third barrel to home: ${splits?.barrel3_to_home_seconds ?? "n/a"}s`;
 
   return `
-COMPUTER VISION DATA:
-- Total run duration: ${pythonResult?.duration_seconds ?? "unknown"} seconds
-- Horse detected in ${pythonResult?.horse_detected_frames ?? "unknown"} frames
-- Pattern direction: ${pythonResult?.pattern_direction ?? "unknown"} (right = 1st barrel to the right)
-- Video resolution: ${pythonResult?.width ?? "?"}x${pythonResult?.height ?? "?"}
-- FPS: ${pythonResult?.fps ?? "?"}
-- Tracking quality: ${JSON.stringify(pythonResult?.tracking_quality || {})}
-- Dense tracking pass used: ${pythonResult?.tracking_quality?.dense_pass_used ?? false}
+=== COMPUTER VISION COACHING DATA ===
 
-BARREL POSITIONS DETECTED:
-${barrelLines.map(l => `- ${l}`).join("\n")}
+Run overview:
+- Duration: ${pythonResult?.duration_seconds ?? "unknown"}s | Pattern: ${pythonResult?.pattern_direction ?? "unknown"}-first
+- Horse tracked: ${pythonResult?.horse_detected_frames ?? "?"} frames | Frames analyzed: ${pythonResult?.tracking_quality?.sampled_frame_count ?? "?"}
+- Video: ${pythonResult?.width ?? "?"}x${pythonResult?.height ?? "?"}
 
-TURN APEX DATA:
-${turnLines.map(l => `- ${l}`).join("\n")}
+${splitReport}
 
-SPLIT TIMES (method: ${splitsMethod}):
-- Alley to first barrel: ${splits?.start_to_barrel1_seconds ?? "n/a"} sec
-- First to second barrel: ${splits?.barrel1_to_barrel2_seconds ?? "n/a"} sec
-- Second to third barrel: ${splits?.barrel2_to_barrel3_seconds ?? "n/a"} sec
-- Third barrel to home: ${splits?.barrel3_to_home_seconds ?? "n/a"} sec
-- TOTAL tracked time: ${pythonResult?.duration_seconds ?? "n/a"} sec
+${speedReport}
 
-CV INSIGHTS FROM VISION MODEL:
-${insights.length ? insights.map(i => `- ${i}`).join("\n") : "- None generated"}
+Per-barrel coaching data:
+${barrelReport}
 
-THIS RUN DATA:
+CV insights:
+${insights.length ? insights.map(i => `- ${i}`).join("\n") : "- None"}
+
+Run data:
 - Horse: ${run?.horse || "not provided"}
-- Official time: ${run?.time || "not provided"} seconds
+- Official time: ${run?.time || "not provided"}s
 - Show: ${run?.showName || "not provided"}
 - Location: ${run?.location || "not provided"}
-- Arena condition: ${run?.arenaCondition || "not provided"}
+- Arena: ${run?.arenaCondition || "not provided"}
 - Placing: ${run?.placing || "not provided"}
 - Earnings: $${run?.earnings || "0"}
-- Rider's own feedback: "${run?.riderFeedback || "none"}"
-- Additional notes: "${run?.notes || "none"}"
+- Rider felt: "${run?.riderFeedback || "no feedback provided"}"
+- Notes: "${run?.notes || "none"}"
   `.trim();
 }
 
 function buildVideoPrompt(run, pythonResult) {
-  const cvSummary = buildCvSummary(run, pythonResult);
+  const coachingData = buildBarrelCoachingData(run, pythonResult);
   const historicalContext = buildHistoricalContext(run);
   const horseName = run?.horse || "this horse";
   const riderName = run?.rider || "the rider";
 
   return `
-You are an elite barrel racing coach — think of the best combination of a seasoned NFR competitor, a patient trainer, and a sharp analyst. You have watched thousands of runs and coached riders from beginners to world champions. You know this sport from the inside out.
+You are an elite barrel racing coach — a seasoned NFR competitor, trainer, and analyst who has watched thousands of runs. You speak directly, use proper barrel racing terminology, and give advice that actually helps riders go faster.
 
-You are reviewing video frame captures and computer vision tracking data from a live barrel racing run. Your job is to give ${riderName} on ${horseName} specific, expert coaching feedback that will actually help them go faster.
+You have detailed computer vision data from ${riderName}'s run on ${horseName}, including per-barrel turn grades, approach angles, speed profiles, exit drive analysis, and potential knockdown flags. Use ALL of this data. Do not give generic advice — every coaching note must connect directly to what the data shows.
 
-CRITICAL RULES FOR YOUR RESPONSE:
-- You are NOT a generic sports AI. You are a barrel racing expert. Sound like one.
-- Use barrel racing terminology naturally: rate, pocket, drive, collection, lead, shoulder, run-down, alley, home, inside leg, outside rein, rate point, two-tracking, over-running, under-running
-- Address each barrel by name (first barrel, second barrel, third barrel) — never "barrel 1"
-- Be direct. "Your horse is dropping its outside shoulder entering the second barrel and blowing past the pocket" beats "there may be issues at barrel two"
-- If a split time is significantly slower than the others, name it. That's where the time is going.
-- If you can see something specific in the frame data, say exactly what you see
-- If data is limited or tracking was partial, be honest but still give your best read
-- Do NOT pad the response with generic encouragement. Every sentence should be useful.
-- The summary should sound like you're standing at the gate talking to the rider right after the run
-- strengths, issues, workOns, drills: 2-4 items each, quality over quantity
-- drills must be SPECIFIC to what you see — not generic exercises
+COACHING RULES:
+- Sound like a real barrel racing coach standing at the gate, not a sports AI
+- Use proper terminology naturally: rate point, pocket, drive, collection, two-tracking, over-running, shoulder drop, lead change, run-down, alley, home
+- Call each barrel by name: first barrel, second barrel, third barrel — never "barrel 1"
+- If the data shows a Grade D or F turn, say it plainly: "You're running wide at the second barrel — that's costing you time"
+- If a knockdown was detected, address it directly
+- If approach angle is "too_straight", explain what that means: the horse will blow past the pocket
+- If exit drive shows "drifted", explain: the horse isn't pushing forward out of the turn
+- The slowest split section IS where the time is going — name it specifically
+- Compare barrel grades to each other: "Your third barrel (Grade A) was your best turn — your second (Grade D) is costing you the most time"
+- If rider left feedback, address it by name
+- Every drill must connect to a specific observed problem
+- NO generic advice. Every sentence earns its place.
 - "bestBarrel" and "bestTurn" must be exactly: "1st", "2nd", or "3rd"
-- "focusNext" is ONE short, specific coaching cue — the single most important thing
-- "speedInsight" must name WHERE time is being lost and WHY based on the data
-- "splitAnalysis" — analyze each split time in context. Which was strongest? Which cost time?
-- "patternNotes" — describe what the path data tells you about this horse's pattern shape
-- Return ONLY valid JSON. No markdown fences. No explanation text. Pure JSON.
+- "focusNext": ONE specific coaching cue — the single highest-priority fix
+- Return ONLY valid JSON. No markdown. No extra text.
 
-${cvSummary}
+${coachingData}
 
 ${historicalContext}
 
-Return ONLY this JSON structure with no extra text:
+Return ONLY this exact JSON structure:
 
 {
-  "summary": "2-3 sentences max. Direct gate-side coaching voice. What just happened and what matters most.",
+  "summary": "2-3 punchy sentences at the gate. Lead with the most important finding from the data. Reference specific barrels and grades.",
   "bestBarrel": "1st",
   "bestTurn": "2nd",
-  "focusNext": "The single most important coaching cue — one specific, actionable thing",
-  "speedInsight": "Exactly where time is being lost on this run and why — be specific to the split data",
-  "splitAnalysis": "Read of each split time — which was strong, which was slow, and what it tells you about the pattern",
-  "patternNotes": "What the tracking data tells you about how this horse is running the pattern — pocket size, approach angles, line shape",
-  "accuracyNotes": "Honest note on what you could and could not see clearly in this footage",
-  "strengths": ["Specific strength 1", "Specific strength 2"],
-  "issues": ["Specific issue 1 with detail", "Specific issue 2 with detail"],
-  "workOns": ["Specific thing to work on 1", "Specific thing to work on 2"],
-  "drills": ["Specific drill 1 tied to what you saw", "Specific drill 2 tied to what you saw"]
+  "focusNext": "One specific, actionable coaching cue tied directly to the data",
+  "speedInsight": "Name the slowest section and explain why based on speed profile and turn grades",
+  "splitAnalysis": "Read each split in context — which was strongest, which cost time, what it tells you about the pattern",
+  "patternNotes": "What the approach angles, tightness grades, and exit drives tell you about how this horse runs the pattern",
+  "accuracyNotes": "Honest note on data quality — what you could see clearly vs what was estimated",
+  "strengths": ["Specific strength tied to data — mention grade or measurement", "Another specific strength"],
+  "issues": ["Specific issue with barrel name and grade — e.g. Wide approach at the second barrel (Grade D, 87px) — running past the pocket", "Another specific issue"],
+  "workOns": ["Specific work-on tied to observed problem", "Another specific work-on"],
+  "drills": ["Specific drill that directly addresses an observed issue", "Another targeted drill"]
 }
   `.trim();
 }
@@ -636,53 +681,49 @@ function buildTextOnlyPrompt(run) {
   const riderName = run?.rider || "the rider";
 
   return `
-You are an elite barrel racing coach — NFR-level experience, thousands of runs coached, deep knowledge of pattern mechanics and horse behavior. You speak directly and practically.
+You are an elite barrel racing coach with NFR-level experience and thousands of runs coached. You speak directly, practically, and with real expertise.
 
-No video is available for this run. You are coaching ${riderName} on ${horseName} based on their run data, their own feedback notes, and their full run history. A good coach can still deliver real value without video — use everything you have.
+No video is available for this run. Coach ${riderName} on ${horseName} using their run data, their own feedback, and their full history. A great coach delivers real value with or without video.
 
-CRITICAL RULES:
-- Acknowledge once that no video is available, then move past it immediately
-- Use the rider's own words from their feedback — if they said they felt late to the first barrel, address THAT specifically
-- Use the historical data to give context — if this was their best time, say so. If they're trending slower, say so.
-- Use proper barrel racing terminology: rate, pocket, drive, collection, lead, shoulder, run-down, alley, home
-- Address each barrel by name — first barrel, second barrel, third barrel
-- Be direct and specific. No filler.
-- "bestBarrel" and "bestTurn": "1st", "2nd", or "3rd" — make your best educated guess from available data
+RULES:
+- Acknowledge once that there's no video, then move on immediately — don't dwell on it
+- Address the rider's own words directly. If they said "felt late to the first barrel" — coach that specific thing
+- Use the history: if this was a personal best, say so. If they're trending slower, say so.
+- Use proper terminology: rate, pocket, drive, collection, shoulder, run-down, alley, home
+- Call barrels by name: first barrel, second barrel, third barrel
+- Every sentence must be useful — no filler, no generic encouragement
+- "bestBarrel" and "bestTurn" must be exactly: "1st", "2nd", or "3rd"
 - "focusNext": ONE specific coaching cue
-- "speedInsight": Where is time likely being lost based on their notes and history?
-- "splitAnalysis": Without video splits, give your read based on their time, placing, and notes
-- "patternNotes": Based on their notes and history, what pattern issues are likely?
-- 2-4 items in strengths/issues/workOns/drills — specific and actionable
 - Return ONLY valid JSON. No markdown. No extra text.
 
-THIS RUN DATA:
+THIS RUN:
 - Horse: ${horseName}
-- Official time: ${run?.time || "not provided"} seconds
+- Time: ${run?.time || "not provided"}s
 - Show: ${run?.showName || "not provided"}
 - Location: ${run?.location || "not provided"}
-- Arena condition: ${run?.arenaCondition || "not provided"}
+- Arena: ${run?.arenaCondition || "not provided"}
 - Placing: ${run?.placing || "not provided"}
 - Earnings: $${run?.earnings || "0"}
-- Rider's own feedback: "${run?.riderFeedback || "none"}"
-- Additional notes: "${run?.notes || "none"}"
+- Rider felt: "${run?.riderFeedback || "no feedback provided"}"
+- Notes: "${run?.notes || "none"}"
 
 ${historicalContext}
 
-Return ONLY this JSON structure with no extra text:
+Return ONLY this JSON:
 
 {
-  "summary": "2-3 sentences. Direct gate-side coaching voice. What this run tells you and what matters most.",
+  "summary": "2-3 sentences at the gate. Reference rider's own feedback and history context.",
   "bestBarrel": "1st",
   "bestTurn": "2nd",
   "focusNext": "The single most important coaching cue for next time",
-  "speedInsight": "Where time is likely being lost based on notes and history",
-  "splitAnalysis": "Read of this run's time in context of their history and what that suggests about the pattern",
-  "patternNotes": "Based on notes and history, what pattern tendencies or issues are likely showing up",
-  "accuracyNotes": "Honest note that this is based on run data and rider notes only — no video available",
-  "strengths": ["Specific strength 1", "Specific strength 2"],
-  "issues": ["Specific issue 1", "Specific issue 2"],
-  "workOns": ["Specific work-on 1", "Specific work-on 2"],
-  "drills": ["Specific drill 1", "Specific drill 2"]
+  "speedInsight": "Where time is likely being lost based on notes, feedback, and history",
+  "splitAnalysis": "Read this time in context of their history — what does it suggest about the pattern",
+  "patternNotes": "Based on rider feedback and history, what pattern tendencies are likely showing up",
+  "accuracyNotes": "Honest note: coaching from rider feedback and history only, no video data available",
+  "strengths": ["Specific strength from feedback or history", "Another specific strength"],
+  "issues": ["Specific issue from rider's own words or history pattern", "Another specific issue"],
+  "workOns": ["Specific work-on tied to their feedback", "Another targeted work-on"],
+  "drills": ["Specific drill tied to their stated problem", "Another targeted drill"]
 }
   `.trim();
 }
@@ -704,6 +745,11 @@ function sanitizeAnalysis(parsed) {
     workOns: Array.isArray(parsed.workOns) ? parsed.workOns : [],
     drills: Array.isArray(parsed.drills) ? parsed.drills : [],
   };
+}
+
+function sanitizeBarrelMetrics(barrelMetrics) {
+  if (!barrelMetrics || typeof barrelMetrics !== "object") return null;
+  return barrelMetrics;
 }
 
 function sanitizePythonForClient(pythonResult) {
@@ -737,6 +783,8 @@ function sanitizePythonForClient(pythonResult) {
     ideal_template_path: pythonResult.ideal_template_path || [],
     insights: Array.isArray(pythonResult.insights) ? pythonResult.insights : [],
     highlights: pythonResult.highlights || null,
+    barrel_metrics: pythonResult.barrel_metrics || null,
+    speed_summary: pythonResult.speed_summary || null,
     sampled_frames: Array.isArray(pythonResult.sampled_frames)
       ? pythonResult.sampled_frames.map((f) => ({
           percent: f?.percent ?? null,
