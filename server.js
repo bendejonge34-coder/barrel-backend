@@ -447,13 +447,25 @@ function selectFramePaths(sampledFrames, maxFrames = 30) {
 }
 
 function buildImageInputs(framePaths) {
-  return framePaths.map((p) => ({
-    type: "image_url",
-    image_url: {
-      url: `data:image/jpeg;base64,${fs.readFileSync(p).toString("base64")}`,
-      detail: "low",
-    },
-  }));
+  // Read frames one at a time to avoid loading all 30 into memory simultaneously
+  // This prevents OOM crashes on Render when processing large frame sets
+  const inputs = [];
+  for (const p of framePaths) {
+    try {
+      const b64 = fs.readFileSync(p).toString("base64");
+      inputs.push({
+        type: "image_url",
+        image_url: {
+          url: `data:image/jpeg;base64,${b64}`,
+          detail: "low",
+        },
+      });
+    } catch (err) {
+      console.warn("[FRAMES] Could not read frame:", p, err.message);
+    }
+  }
+  console.log(`[FRAMES] Loaded ${inputs.length} of ${framePaths.length} frames for GPT-4o`);
+  return inputs;
 }
 
 // ─── Historical Context Builder ───────────────────────────────────────────────
@@ -557,69 +569,106 @@ Recent rider feedback and notes:
 // like a professional with deep barrel racing expertise.
 
 const BARREL_RACING_KNOWLEDGE_BASE = `
-=== BARREL RACING COACHING KNOWLEDGE BASE ===
-You have internalized the following expert knowledge. Apply it to every analysis.
+=== BARREL RACING EXPERT COACHING KNOWLEDGE ===
+You are an elite barrel racing coach. Apply this knowledge to every analysis.
 
-── THE IDEAL LINE & APPROACH ──────────────────────────────────────────────────
+── CORE PHILOSOPHY ────────────────────────────────────────────────────────────
+"Speed is a byproduct of correctness. If you fix the mechanics, the clock will follow."
+"A great run is a conversation, not a fight. The best riders do 90% of their work in the training pen so that during the 15-second run, they can simply stay out of the horse's way."
+The straightaways are for speed. The turns are for precision. If you don't set up the approach, you've lost the turn before you even get there.
 
-APPROACH ANGLE — Never run straight at a barrel. A straight approach forces a sharp jerky turn that kills momentum and causes the horse to shoulder the barrel. The ideal path is a "J" shape — arcing toward a point 5-8 feet to the side of the barrel before beginning the turn. Think of it as aiming slightly past the barrel, then letting the arc bring you around it.
+── THE APPROACH & THE POCKET ──────────────────────────────────────────────────
+The turn doesn't start AT the barrel — it starts 15 feet before it.
+Use a J-shape approach: aim 5-8 feet to the side of the barrel, never straight at it. Running straight forces a hard check that kills momentum.
+The Pocket: Maintain 4-6 feet of lateral clearance. This gives the horse room to move its ribcage without hitting the barrel. Too tight (under 2 feet) swings the hind end out and hits the backside. Too wide wastes time.
+The First Barrel is the "money barrel" — highest speed entry. Sets up the entire run.
+Second and Third Barrels: Cross-fire your vision. As you leave each barrel, look at the ENTRY POINT of the next barrel, not the barrel itself.
 
-THE POCKET — The space between horse and barrel during the turn. Keep 4-6 feet of lateral clearance on the approach. Too tight (2 feet or less) causes the hind end to swing out and hit the barrel on the backside, or the horse pops their front end to get around it. Too wide wastes time. The horse's entire body — nose to tail — must fit cleanly around the arc.
+── THE RATE POINT ─────────────────────────────────────────────────────────────
+Rate (shift weight from front end to hocks) when the horse's nose is even with the barrel.
+Sit deep — "pockets in the dirt." Sink weight into seat bones. This is the physical cue for the horse to shift weight to its hocks and prepare to turn.
+Stop driving with your legs. Use a slight command rein to ask the horse to break at the poll and gather its stride.
+Rate too early = lose speed. Rate too late = "go long" (overshoot the turn, have to hook back).
+"Crating" fix for going long: Stop the horse at the rate point every time in practice until they learn to wait for your seat.
 
-THE RATE POINT — Rate (shift weight from front end to hocks) when the horse's nose is even with the barrel. Sit deep in the saddle, stop driving with your legs, apply a slight command rein. This causes the horse to break at the poll and gather their stride. Rate too early = lose speed. Rate too late = go long (overshoot the turn). "Going long" at any barrel is one of the biggest time killers in the sport.
+── THE TURN ───────────────────────────────────────────────────────────────────
+Keep the horse's inside shoulder UP. A dropped shoulder causes slicing, loss of arc, and knocked barrels.
+The horse should bend around your inside leg — ribcage arc ensures hind feet follow front feet in a single track for maximum traction.
+Wait until your leg (cinch) passes the barrel before committing to the turn.
+Snap your eyes to the next barrel at the 3/4 mark of the turn — this leads the horse's momentum out of the turn.
+Never look at the barrel itself. Look 10 feet past it on approach, then snap to the next destination mid-turn.
+Finish the turn — leaving too early causes a wide exit and poor line to the next barrel.
 
-THE TURN — Keep the horse's inside shoulder UP. A dropped inside shoulder causes the horse to "slice" the turn — losing the arc and running into the barrel. Aim to have your leg (cinch) pass the barrel before asking for full commitment to the turn. Once your leg clears the barrel, look toward the next barrel immediately. The horse follows your eyes.
+── RIDER HAND POSITION ────────────────────────────────────────────────────────
+Keep hands LOW. High hands = high-headed horse. A high-headed horse cannot see the ground or turn efficiently.
+Inside hand: Guides the nose. Creates a soft arc — never a sharp pull. "Sawing" on the bit makes horses nervous and braced.
+Outside hand: The "Wall." Keeps the horse from drifting out and keeps the shoulder upright. This is often more important than the inside hand.
+One-handed guide: Barrel racing is more about legs and seat than steering. If the horse won't turn without heavy hands, return to lateral work.
+Never hunt for the horn until AFTER you have sat deep. Grabbing the horn early pulls the chest forward, tips weight to the front end, pushes nose into the barrel.
 
-── HORSE BODY MECHANICS ───────────────────────────────────────────────────────
+── RIDER SEAT & BODY POSITION ─────────────────────────────────────────────────
+Straightaways: Stand slightly in stirrups (two-point position) to take weight off horse's back, allowing full stride extension.
+Rate point: Sit deep in pockets — this is a physical cue, not just balance.
+Through the turn: Spine aligned with horse's spine. Do NOT lean (motorcycle lean) — shifting weight to inside shoulder causes diving and slicing.
+After the turn: Forward and athletic to push the horse to the next spot. Getting left behind (leaning back during acceleration) hits horse in the mouth.
 
-INSIDE SHOULDER — Must stay elevated through the entire turn. If the inside shoulder drops, the horse slices, loses the arc, and is likely to knock the barrel. Look for shoulder drop in the frames.
+── COMMON FAULTS & EXACT FIXES ────────────────────────────────────────────────
 
-HINDQUARTER ENGAGEMENT — The horse should pivot and push from the hind end, not pull themselves around with the front legs. Good collection means weight shifts to the hocks. Watch for whether the horse is "driving" out of the turn with their hindquarters or just shuffling forward.
+1. DIVING INTO THE TURN (Pocket Killer #1)
+Leaning body or pulling horse's nose in too early → horse shoulders in, hits barrel or loses momentum.
+Fix drill: "Square the Barrel" — approach at a trot, ride a literal square around the barrel. Only turn when you can see the backside. Keep shoulders upright past the rate point.
 
-COLLECTION vs EXTENSION — Collection before the barrel (weight back, hocks under), extension between barrels (full stride, driving forward). Horses that never collect run past the pocket. Horses that never extend lose time on the straight runs.
+2. LOOKING AT THE BARREL
+Staring at the barrel shifts body weight, drops shoulder, horse follows eyes into collision.
+Fix drill: "Horizon Focus" — focus on a spot 10 feet past the barrel on approach. Don't look at the next barrel until your horse's hip has cleared the current one.
 
-EXIT DRIVE — After clearing each barrel, the horse should immediately accelerate. A horse that "drifts" or coasts out of a turn is losing significant time. You want to see the horse's hind end engage and push hard within 2-3 strides of the apex.
+3. OVER-HANDLING / SAWING ON THE BIT
+Pulling inside rein throughout the turn pulls horse off-balance, prevents hindquarter power.
+Fix drill: "One-Handed Guide" — work the pattern using only dominant hand. Use legs and seat to steer. If horse won't respond, return to lateral work (side-passing, leg-yielding).
 
-HEAD POSITION — A horse with their head up and nose out is on their forehand and cannot collect properly. A horse breaking at the poll with a soft jaw is correctly rated. Watch for head carriage in the frames.
+4. SHOULDERING IN
+Horse leans into barrel, knocks it with shoulder or rider's knee.
+Fix: More inside leg, more outside rein. Keep horse "square" until turning point.
+Fix drill: "Counter-Bending Circles" — circle barrel while bending horse's nose AWAY from barrel. Lifts inside shoulder, engages hindquarters.
 
-LEAD CHANGES — The horse should be on the correct lead for each turn. Incorrect leads cause the horse to fall in or out of the arc. This is visible in the video frames if the horse's front legs are visible.
+5. GOING LONG (Overshooting)
+Horse runs past barrel, has to hook back. Caused by failure to rate.
+Fix drill: "Transition Points" — pick a point 15 feet before barrel, every time transition from lope to trot. Builds rate muscle memory.
 
-── RIDER BODY MECHANICS ───────────────────────────────────────────────────────
+6. FAILING TO FINISH THE TURN (Early Exit)
+Leaving too early causes wide exit, poor line to next barrel.
+Fix drill: "One-and-a-Half" — make a full circle around barrel PLUS another half-turn before heading to next. Teaches horse to keep turning until told to leave.
 
-THE "MOTORCYCLE LEAN" — The most common mistake. Leaning your upper body into the barrel feels natural but actually shifts weight to the horse's inside shoulder, causing them to dive and slice the turn. Knocking barrels is the direct result. The fix: keep your spine aligned with the horse's spine. Weight should be centered or on the outside stirrup. This allows the horse to pick up its inside shoulder and snap around the turn.
+7. IMPROPER POCKET SIZING
+Too tight or too wide ruins approach angle and momentum.
+Fix drill: "Pinwheel" — set 4 cones around barrel at 5-foot intervals. Spiral in and out at a trot to master spatial awareness of the pocket.
 
-SITTING DOWN TO RATE — When the horse's nose reaches the barrel, the rider must sit deep — "pockets in the dirt." Staying in a forward racing position keeps weight on the front end, making the horse heavy and prone to blowing the turn. Sitting deep is a physical cue to the horse to engage the hind end.
+8. GETTING AHEAD OF THE HORSE
+Leaning forward over neck before turn is finished → horse stumbles, loses hind-end engagement.
+Fix drill: "Deep Sit Stop" — lope the pattern and ask for complete stop at backside of every barrel. Must sit deep to cue the stop.
 
-GETTING LEFT BEHIND — Leaning back when the horse accelerates out of a turn or down the alley puts the rider behind the motion. This puts pressure on the horse's mouth and back. On the straight runs, the rider should be slightly forward in a "power position" to allow the horse to extend fully.
+9. LACK OF RATE (Running Past)
+Horse blows past barrel because it didn't gear down.
+Fix: Consistent rate cue every practice run. Horse must learn to wait for the seat.
 
-THE DEATH GRIP ON REINS — Pulling too hard on the inside rein pops the horse's ribs to the outside, loses the arc, and causes loss of footing. Keep a soft hand — guide the nose, use the outside rein to keep the horse framed. Barrel racing is more leg and body weight than rein steering.
-
-HUNTING THE HORN — Grabbing the saddle horn before completing the rate tips the rider's chest forward and down, pushing the horse's nose into the barrel. Correct sequence: sit deep FIRST, then use the horn as an anchor to stay deep in the saddle during the snap of the turn.
-
-BUSY LEGS — Legs swinging or washing out creates white noise the horse ignores. Worse, if the inside leg is constantly pushing during the turn, it tells the horse to move away from the barrel. The legs should be a frame: outside leg behind the cinch controls the hindquarters, inside leg quiet unless needed to lift the shoulder.
-
-EYES — Look at the entry point (pocket) on approach. The moment the horse's nose clears the barrel, snap your head to the next barrel. Your body follows your eyes, and the horse follows your body. Staring at the barrel causes the rider to lean in and the horse to go into it.
+10. INCONSISTENT ALLEYWAY BEHAVIOR
+Fighting in the alley causes stressed entry, poor alignment.
+Fix drill: "Quiet Entry" — walk into alley, stop, back up, sit quietly until horse exhales, then walk out. Alley must represent calm, not chaos.
 
 ── SPLIT TIME INTERPRETATION ──────────────────────────────────────────────────
+Slow alley-to-first: Late to rate, approach angle too straight, wrong rate point, or alley stress.
+Slow first-to-second or second-to-third: Horse not driving between barrels. Rider sitting back (getting left behind), horse still in rate mode, not extending on the straightaway.
+Slow third-to-home: Horse not rated out cleanly, tired, or rider not in two-point pushing forward.
+One slow split vs others: Problem is specific to that barrel — check turn grade, approach angle, and exit drive data for that barrel specifically.
+A run that feels fast but clocks slow = wide turns. A run that feels slow but clocks well = tight, efficient turns.
 
-SLOW ALLEY-TO-FIRST — Late to the first barrel. Check: approach angle too straight, wrong rate point, or horse not rated at all. This is the setup for the entire run.
-
-SLOW FIRST-TO-SECOND or SECOND-TO-THIRD — Horse not driving between barrels. Check: rider sitting back on the straightaway (getting left behind), horse not extending, or horse still mentally in "rate mode" and not switched back to drive.
-
-SLOW THIRD-TO-HOME — Horse not rated out of the third barrel, tired, or rider sitting back and not pushing. After the third barrel, the horse needs to be immediately pushed for home. Any hesitation costs significant time.
-
-A SLOW SINGLE SPLIT COMPARED TO OTHERS — Points directly to a problem at that specific barrel. Check the turn grade, approach angle, and exit drive data for that barrel.
-
-── COMMON PROBLEMS & ROOT CAUSES ──────────────────────────────────────────────
-
-Running past the pocket → approach angle too straight, turned too early
-Knocking barrel on front → turned too early, horse's nose in the barrel
-Knocking barrel on back → hind end swung out, pocket too tight on approach
-Blowing the turn (going wide) → failed to rate, stayed in forward position too long
-Slicing the turn → inside shoulder dropped, motorcycle lean from rider
-Losing drive out of turn → rider got left behind, horse not engaging hind end
-Hesitation at barrel → horse anticipating the rate and shutting down early
-Weak alley run → horse not extended, rider not in power position, too much rein contact
+── HORSE BODY MECHANICS ───────────────────────────────────────────────────────
+Inside shoulder dropped = slicing the turn, loss of arc, likely knockdown.
+High head/nose out = on the forehand, cannot collect or turn efficiently.
+Breaking at poll with soft jaw = correctly rated and collected.
+Ribcage bending around inside leg = single-track movement, maximum traction.
+Exit drive = horse pushes hard from hindquarters within 2-3 strides of apex. Drifting or coasting out = losing significant time.
+A horse that anticipates the rate and shuts down early = over-trained rate, needs more forward work.
 `;
 
 function buildBarrelCoachingData(run, pythonResult) {
@@ -747,8 +796,8 @@ COACHING RULES:
 - If the horse's inside shoulder is dropped — explain what that costs them
 - Compare the three barrels — which was cleanest, which needs work
 - If manual splits were set, they are highly accurate — use them as ground truth
-- Every drill must connect to a specific observed problem
-- NO generic advice. Every sentence must be useful.
+- Every drill must connect to a specific observed problem — use the named drills from the knowledge base when applicable: Square the Barrel, Horizon Focus, One-Handed Guide, Counter-Bending Circles, Transition Points, One-and-a-Half, Pinwheel, Deep Sit Stop, Quiet Entry, Loose Rein Loping
+- NO generic advice. Every sentence must earn its place. Sound like a real professional coach, not an AI.
 - "bestBarrel" and "bestTurn" must be exactly: "1st", "2nd", or "3rd"
 - Return ONLY valid JSON. No markdown. No extra text.
 
@@ -932,18 +981,18 @@ async function processVideoJob(jobId) {
   try {
     updateJob(jobId, { status: "running", progress: 5, stage: "Starting analysis", startedAt: new Date().toISOString() });
 
-    updateJob(jobId, { progress: 10, stage: "Running computer vision" });
+    updateJob(jobId, { progress: 8, stage: "Running computer vision — tracking horse and barrels" });
     const pythonResult = await runPythonAnalysis(videoPath, job.run);
     pythonGeneratedPaths = getPythonGeneratedPaths(pythonResult);
 
-    updateJob(jobId, { progress: 60, stage: "Selecting key frames" });
-    const framePaths = selectFramePaths(pythonResult.sampled_frames || [], 4);
+    updateJob(jobId, { progress: 55, stage: "Computer vision complete — selecting key frames" });
+    const framePaths = selectFramePaths(pythonResult.sampled_frames || [], 30);
     if (!framePaths.length) throw new Error("Python did not return any usable frame images.");
 
-    updateJob(jobId, { progress: 68, stage: "Preparing frames for AI" });
+    updateJob(jobId, { progress: 62, stage: "Preparing frames for AI coach" });
     const imageInputs = buildImageInputs(framePaths);
 
-    updateJob(jobId, { progress: 75, stage: "Requesting AI coaching analysis" });
+    updateJob(jobId, { progress: 70, stage: "Sending to AI coach — analyzing your run" });
 
     const latestJob = jobs.get(jobId);
     if (!latestJob) throw new Error("Job disappeared before AI analysis.");
@@ -952,7 +1001,7 @@ async function processVideoJob(jobId) {
     // coaching quality, reasoning depth, and barrel racing expertise.
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
-      max_tokens: 2400,
+      max_tokens: 3000,
       messages: [{
         role: "user",
         content: [
@@ -962,15 +1011,22 @@ async function processVideoJob(jobId) {
       }],
     });
 
-    updateJob(jobId, { progress: 92, stage: "Finalizing analysis" });
+    updateJob(jobId, { progress: 90, stage: "Finalizing coaching feedback" });
 
     const outputText = response.choices?.[0]?.message?.content || "";
     let parsedAnalysis;
     try {
       parsedAnalysis = parseModelJson(outputText);
     } catch {
-      console.error("[VIDEO JOB] Invalid AI JSON:", preview(outputText, 500));
-      throw new Error("AI returned invalid JSON.");
+      // Try to recover partial JSON
+      const recovered = extractLastJsonObject(outputText);
+      if (recovered && recovered.summary) {
+        parsedAnalysis = recovered;
+        console.warn("[VIDEO JOB] Recovered partial JSON from AI response");
+      } else {
+        console.error("[VIDEO JOB] Invalid AI JSON:", preview(outputText, 500));
+        throw new Error("AI returned invalid JSON.");
+      }
     }
 
     updateJob(jobId, {
@@ -1015,19 +1071,25 @@ async function processTextJob(jobId) {
     // IMPROVEMENT #3: Upgraded from gpt-4o-mini to gpt-4o
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
-      max_tokens: 2400,
+      max_tokens: 3000,
       messages: [{ role: "user", content: buildTextOnlyPrompt(latestJob.run) }],
     });
 
-    updateJob(jobId, { progress: 92, stage: "Finalizing analysis" });
+    updateJob(jobId, { progress: 90, stage: "Finalizing coaching feedback" });
 
     const outputText = response.choices?.[0]?.message?.content || "";
     let parsedAnalysis;
     try {
       parsedAnalysis = parseModelJson(outputText);
     } catch {
-      console.error("[TEXT JOB] Invalid AI JSON:", preview(outputText, 500));
-      throw new Error("AI returned invalid JSON.");
+      const recovered = extractLastJsonObject(outputText);
+      if (recovered && recovered.summary) {
+        parsedAnalysis = recovered;
+        console.warn("[TEXT JOB] Recovered partial JSON from AI response");
+      } else {
+        console.error("[TEXT JOB] Invalid AI JSON:", preview(outputText, 500));
+        throw new Error("AI returned invalid JSON.");
+      }
     }
 
     updateJob(jobId, {
