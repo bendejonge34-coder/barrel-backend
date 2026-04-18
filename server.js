@@ -389,15 +389,25 @@ async function runPythonAnalysis(videoPath, run = {}) {
 }
 
 // ─── Frame Selection ──────────────────────────────────────────────────────────
-// Smart strategic 30-frame selection targeting the most important moments:
-// alley approach, barrel approaches, apexes, exits, and home run.
+// Smart strategic frame selection — 30 frames total.
+// If rider set manual splits, use split timestamps to anchor zones precisely.
+// If no splits, use percentage-based zones (no alley — wasted frames).
+//
+// When splits are available:
+//   - videoDuration from pythonResult tells us total video length in seconds
+//   - barrel_video_timestamps (b1, b2, b3) are video positions when rider tapped each barrel
+//   - We build zones centered on those exact timestamps
+//
+// The barrel_video_timestamps also tell CV exactly WHERE each barrel is in the video timeline,
+// which is passed to Python for more accurate barrel detection anchoring.
 
-function selectFramePaths(sampledFrames, maxFrames = 30) {
+function selectFramePaths(sampledFrames, maxFrames = 30, run = null, videoDuration = null) {
   const usable = (sampledFrames || [])
     .filter((f) => f?.read_success && (f?.overlay_image_path || f?.image_path))
     .map((f) => ({
       path: f.overlay_image_path || f.image_path,
       percent: f.percent ?? 0,
+      timeSec: f.time_sec ?? null,
       dense: !!f.dense_pass,
     }))
     .filter((f) => f.path);
@@ -405,23 +415,111 @@ function selectFramePaths(sampledFrames, maxFrames = 30) {
   if (usable.length === 0) return [];
   if (usable.length <= maxFrames) return usable.map((f) => f.path);
 
-  // Strategic zones as % of run — each zone gets a frame allocation
+  // ── SPLIT-AWARE SELECTION ─────────────────────────────────────────────────
+  // If rider set manual splits AND we have barrel video timestamps, build zones
+  // anchored to the exact video positions where each barrel was reached.
+  const barrelTimestamps = run?.barrel_location_hints || run?.manualSplits?.barrel_video_timestamps || null;
+  const splits = run?.manualSplits || null;
+  const totalDuration = videoDuration || null;
+
+  if (splits && barrelTimestamps && totalDuration && totalDuration > 0) {
+    const b1t = barrelTimestamps.barrel1; // video seconds when rider tapped B1
+    const b2t = barrelTimestamps.barrel2;
+    const b3t = barrelTimestamps.barrel3;
+    const startT = splits.start_to_barrel1_seconds != null ? 0 : null; // run starts at 0
+    const finishT = totalDuration;
+
+    // Convert video timestamp → percent of total video
+    const toPercent = (t) => Math.max(0, Math.min(1, t / totalDuration));
+    const window = (t, before, after) => ({ min: toPercent(t - before), max: toPercent(t + after) });
+
+    // Build split-anchored zones — no alley, focused on the action
+    // START of run = after rider clicked START (skip pre-run)
+    const runStartPercent = splits.start_to_barrel1_seconds != null
+      ? Math.max(0, toPercent((b1t || 0) - splits.start_to_barrel1_seconds - 1))
+      : 0.10; // fallback: skip first 10% (alley)
+
+    const zones = [];
+
+    // Pre-run approach (from START click to B1 approach) — 2 frames
+    if (b1t != null) {
+      zones.push({ min: runStartPercent, max: toPercent(b1t - 1.5), count: 2, label: "run start→B1 approach" });
+      // B1 apex — centered on exact timestamp, ±1.5s — 5 frames
+      zones.push({ ...window(b1t, 1.5, 1.5), count: 5, label: "B1 apex" });
+      // B1 exit — 1.5s after B1 — 2 frames
+      zones.push({ ...window(b1t + 1.5, 0, 1.5), count: 2, label: "B1 exit" });
+    }
+
+    if (b2t != null) {
+      // B2 approach — between B1 exit and B2 — 3 frames
+      const b2ApproachMin = b1t != null ? toPercent(b1t + 2.5) : runStartPercent;
+      zones.push({ min: b2ApproachMin, max: toPercent(b2t - 1.0), count: 3, label: "B2 approach" });
+      // B2 apex — 5 frames
+      zones.push({ ...window(b2t, 1.5, 1.5), count: 5, label: "B2 apex" });
+      // B2 exit — 2 frames
+      zones.push({ ...window(b2t + 1.5, 0, 1.5), count: 2, label: "B2 exit" });
+    }
+
+    if (b3t != null) {
+      // B3 approach — 3 frames
+      const b3ApproachMin = b2t != null ? toPercent(b2t + 2.5) : runStartPercent;
+      zones.push({ min: b3ApproachMin, max: toPercent(b3t - 1.0), count: 3, label: "B3 approach" });
+      // B3 apex — 5 frames
+      zones.push({ ...window(b3t, 1.5, 1.5), count: 5, label: "B3 apex" });
+      // B3 exit + home run — 3 frames
+      zones.push({ ...window(b3t + 1.5, 0, toPercent(finishT) - toPercent(b3t + 1.5)), count: 3, label: "B3 exit→home" });
+    }
+
+    console.log(`[FRAMES] Using SPLIT-ANCHORED selection — ${zones.length} zones from barrel timestamps`);
+
+    const selected = new Set();
+    for (const zone of zones) {
+      if (zone.min >= zone.max) continue;
+      const inZone = usable.filter((f) => f.percent >= zone.min && f.percent <= zone.max);
+      if (inZone.length === 0) continue;
+      const dense = inZone.filter((f) => f.dense);
+      const pool = dense.length > 0 ? dense : inZone;
+      const count = Math.min(zone.count, pool.length);
+      for (let i = 0; i < count; i++) {
+        const idx = Math.round((i * (pool.length - 1)) / Math.max(count - 1, 1));
+        selected.add(pool[idx].path);
+      }
+    }
+
+    // Fill any remaining slots evenly from non-alley portion of video
+    if (selected.size < maxFrames) {
+      const remaining = maxFrames - selected.size;
+      const nonAlley = usable.filter((f) => f.percent >= runStartPercent);
+      for (let i = 0; i < remaining; i++) {
+        const idx = Math.round((i * (nonAlley.length - 1)) / Math.max(remaining - 1, 1));
+        selected.add(nonAlley[idx].path);
+      }
+    }
+
+    console.log(`[FRAMES] Split-anchored: ${selected.size} frames selected`);
+    return [...selected].slice(0, maxFrames);
+  }
+
+  // ── PERCENTAGE-BASED FALLBACK (no splits) ────────────────────────────────
+  // No alley — skip first 12% of video (pre-run approach).
+  // Redistribute those 2 frames to barrels instead.
+  console.log(`[FRAMES] Using PERCENTAGE-BASED selection (no manual splits)`);
+
   const zones = [
-    { min: 0.00, max: 0.15, count: 2 },  // alley
-    { min: 0.13, max: 0.28, count: 3 },  // barrel 1 approach
-    { min: 0.26, max: 0.38, count: 4 },  // barrel 1 apex
-    { min: 0.36, max: 0.44, count: 2 },  // barrel 1 exit
+    { min: 0.12, max: 0.25, count: 3 },  // barrel 1 approach (skip alley)
+    { min: 0.23, max: 0.36, count: 5 },  // barrel 1 apex
+    { min: 0.34, max: 0.43, count: 3 },  // barrel 1 exit
     { min: 0.40, max: 0.52, count: 3 },  // barrel 2 approach
-    { min: 0.50, max: 0.60, count: 4 },  // barrel 2 apex
-    { min: 0.58, max: 0.65, count: 2 },  // barrel 2 exit
-    { min: 0.62, max: 0.74, count: 3 },  // barrel 3 approach
-    { min: 0.72, max: 0.82, count: 4 },  // barrel 3 apex
-    { min: 0.80, max: 0.88, count: 2 },  // barrel 3 exit
-    { min: 0.86, max: 1.00, count: 1 },  // home run
+    { min: 0.50, max: 0.62, count: 5 },  // barrel 2 apex
+    { min: 0.60, max: 0.68, count: 3 },  // barrel 2 exit
+    { min: 0.65, max: 0.76, count: 3 },  // barrel 3 approach
+    { min: 0.74, max: 0.84, count: 5 },  // barrel 3 apex
+    { min: 0.82, max: 1.00, count: 3 },  // barrel 3 exit + home run
   ];
 
-  const selected = new Set();
+  // Total allocation = 33 slots for 30 frames — zones will compete for frames naturally
 
+  const selected = new Set();
   for (const zone of zones) {
     const inZone = usable.filter((f) => f.percent >= zone.min && f.percent <= zone.max);
     if (inZone.length === 0) continue;
@@ -434,12 +532,13 @@ function selectFramePaths(sampledFrames, maxFrames = 30) {
     }
   }
 
-  // Fill remaining slots with evenly spaced frames
+  // Fill remaining slots from non-alley frames
   if (selected.size < maxFrames) {
     const remaining = maxFrames - selected.size;
+    const nonAlley = usable.filter((f) => f.percent >= 0.12);
     for (let i = 0; i < remaining; i++) {
-      const idx = Math.round((i * (usable.length - 1)) / Math.max(remaining - 1, 1));
-      selected.add(usable[idx].path);
+      const idx = Math.round((i * (nonAlley.length - 1)) / Math.max(remaining - 1, 1));
+      selected.add(nonAlley[idx].path);
     }
   }
 
@@ -628,47 +727,67 @@ Through the turn: Spine aligned with horse's spine. Do NOT lean (motorcycle lean
 After the turn: Forward and athletic to push the horse to the next spot. Getting left behind (leaning back during acceleration) hits horse in the mouth.
 
 ── COMMON FAULTS & EXACT FIXES ────────────────────────────────────────────────
+Source: "Championship Barrel Racing — The Professional Coach's Guide to Corrective Training"
+Core principle: "Speed is a byproduct of correctness. If you fix the mechanics, the clock will follow."
 
 1. DIVING INTO THE TURN (Pocket Killer #1)
-Leaning body or pulling horse's nose in too early → horse shoulders in, hits barrel or loses momentum.
-Fix drill: "Square the Barrel" — approach at a trot, ride a literal square around the barrel. Only turn when you can see the backside. Keep shoulders upright past the rate point.
+Leaning your body or pulling the horse's nose in too early, causing them to shoulder the barrel or hit it.
+What it looks like: Rider leans inward before leg reaches the barrel. Horse's inside shoulder drops and they cut the turn short.
+Fix drill: "The Square Turn" — Ride PAST the barrel until your leg is even with it, then execute a 90-degree square turn rather than a circle. This forces the horse to keep their shoulders upright and wait for the cue. Do NOT begin turning until your leg (cinch) is even with the barrel.
 
 2. LOOKING AT THE BARREL
-Staring at the barrel shifts body weight, drops shoulder, horse follows eyes into collision.
-Fix drill: "Horizon Focus" — focus on a spot 10 feet past the barrel on approach. Don't look at the next barrel until your horse's hip has cleared the current one.
+Staring at the barrel ("tin") causes your body to tip and your horse to follow your eyes directly into a collision.
+What it looks like: Rider's head drops or turns toward barrel on approach. Body follows eyes, weight shifts inside.
+Fix drill: "The Horizon Focus" — Pick a banner or a spot on the arena fence 10 feet past the barrel. Eyes forward on approach. Don't look at the NEXT barrel until your horse's hip has cleared the current one.
 
-3. OVER-HANDLING / SAWING ON THE BIT
-Pulling inside rein throughout the turn pulls horse off-balance, prevents hindquarter power.
-Fix drill: "One-Handed Guide" — work the pattern using only dominant hand. Use legs and seat to steer. If horse won't respond, return to lateral work (side-passing, leg-yielding).
+3. SHOULDERS DROPPING ("Washing Out")
+Allowing the horse to drop their inside shoulder, losing leverage and power in the turn. The horse "washes out" — slips wide or knocks the barrel.
+What it looks like: Horse's inside shoulder visibly drops mid-turn. Hind end swings out. Turn loses arc and traction.
+Fix drill: "Counter-Bending Circles" — Circle the barrel while bending the horse's nose AWAY from the barrel. This lifts the inside shoulder and engages the hindquarters. Repeat until horse can hold the lift through the entire circle.
 
-4. SHOULDERING IN
+4. OVER-HANDLING / SAWING ON THE BIT
+Using aggressive, jerky hand movements that make the horse nervous and "braced" against the bit.
+What it looks like: Rider's hands active and pulling throughout the turn. Horse's head is elevated, jaw tight, movement choppy.
+Fix drill: "Loose Rein Loping" — Lope a large circle around the barrel on a completely loose rein, using only your weight and legs to steer. Reward the horse when they hold the path. This resets the horse to respond to the seat, not the hands.
+
+5. FAILING TO FINISH THE TURN (Early Exit)
+Leaving the barrel too early, resulting in a wide exit and a poor line to the next barrel.
+What it looks like: Horse and rider peel away from the barrel before the turn is complete. Exit angle is wide. Next approach is compromised.
+Fix drill: "The One-and-a-Half" — Make a full circle around the barrel PLUS another half-turn before heading to the next. This teaches the horse to keep turning until specifically told to leave. Builds patience and finish through the turn.
+
+6. IMPROPER POCKET SIZING
+Entering too tight or too wide, ruining the approach angle and momentum.
+What it looks like: Too tight = horse clips barrel with shoulder or hind end. Too wide = horse has to hook back, losing speed and line.
+Fix drill: "The Pinwheel" — Set up 4 cones around a barrel at 5-foot intervals. Practice spiraling in and out of the cones at a trot to master spatial awareness of your "pocket." Ideal pocket = 4-6 feet of clearance.
+
+7. GETTING AHEAD OF THE HORSE
+Leaning forward over the neck before the horse has finished the turn, causing them to stumble or lose hind-end engagement.
+What it looks like: Rider's weight tips forward mid-turn or at exit. Horse's front end heavy, hindquarters disengage. Often causes horse to drift wide on exit.
+Fix drill: "The Deep Sit Stop" — Lope the pattern and ask for a complete stop at the backside of every barrel. You must sit DEEP in your pockets to cue the stop. This trains both horse and rider to maintain hindquarter engagement through and past the apex.
+
+8. LACK OF RATE (Running Past)
+The horse "blows" past the barrel because they didn't gear down or prepare for the turn.
+What it looks like: Horse approaches at full speed with no collection. Has to hook back after passing barrel or knocks it going past.
+Fix drill: "Transition Points" — Pick a point 15 feet before the barrel. Every time you hit that point, you MUST transition from a lope to a trot. This builds the "rate" muscle memory. Once consistent, move the transition point back gradually until the horse rates off your seat alone.
+
+9. SHOULDERING IN
 Horse leans into barrel, knocks it with shoulder or rider's knee.
-Fix: More inside leg, more outside rein. Keep horse "square" until turning point.
-Fix drill: "Counter-Bending Circles" — circle barrel while bending horse's nose AWAY from barrel. Lifts inside shoulder, engages hindquarters.
-
-5. GOING LONG (Overshooting)
-Horse runs past barrel, has to hook back. Caused by failure to rate.
-Fix drill: "Transition Points" — pick a point 15 feet before barrel, every time transition from lope to trot. Builds rate muscle memory.
-
-6. FAILING TO FINISH THE TURN (Early Exit)
-Leaving too early causes wide exit, poor line to next barrel.
-Fix drill: "One-and-a-Half" — make a full circle around barrel PLUS another half-turn before heading to next. Teaches horse to keep turning until told to leave.
-
-7. IMPROPER POCKET SIZING
-Too tight or too wide ruins approach angle and momentum.
-Fix drill: "Pinwheel" — set 4 cones around barrel at 5-foot intervals. Spiral in and out at a trot to master spatial awareness of the pocket.
-
-8. GETTING AHEAD OF THE HORSE
-Leaning forward over neck before turn is finished → horse stumbles, loses hind-end engagement.
-Fix drill: "Deep Sit Stop" — lope the pattern and ask for complete stop at backside of every barrel. Must sit deep to cue the stop.
-
-9. LACK OF RATE (Running Past)
-Horse blows past barrel because it didn't gear down.
-Fix: Consistent rate cue every practice run. Horse must learn to wait for the seat.
+What it looks like: Horse's body angle wrong — ribcage pushes into the barrel rather than arcing around it.
+Fix: More inside leg at the girth, more outside rein. Keep horse "square" until the actual turning point.
+Fix drill: "Counter-Bending Circles" (same as fault #3 — this drill addresses both shoulder drop and shouldering in).
 
 10. INCONSISTENT ALLEYWAY BEHAVIOR
-Fighting in the alley causes stressed entry, poor alignment.
-Fix drill: "Quiet Entry" — walk into alley, stop, back up, sit quietly until horse exhales, then walk out. Alley must represent calm, not chaos.
+Fighting in the alley causes stressed entry, poor alignment, and a rushed approach to first barrel.
+What it looks like: Horse jigging, spinning, refusing to stand in alley. Rider tense. Entry rushed and crooked.
+Fix drill: "Quiet Entry" — Walk into alley, stop, back up, sit quietly until horse exhales, then walk out calmly. Repeat. Alley must represent calm, not launch. A stressed alley entry ruins the approach to first barrel every time.
+
+── FAULT DIAGNOSIS FROM SPLIT DATA ────────────────────────────────────────────
+When you see a slow split, connect it to the specific fault it most likely represents:
+Slow alley→1st: Alley stress, wrong approach angle, failure to rate at the right point, or diving too early.
+Slow 1st→2nd or 2nd→3rd: Horse not driving between barrels. Rider getting left behind (leaning back during acceleration). Horse still in rate mode — not extending on the straightaway. Early exit from previous barrel causing bad line.
+Slow 3rd→home: Rider not in two-point pushing forward. Horse not rated out cleanly. Fatigue. Or rider mentally "done" before the run is.
+One split dramatically slower than others: Problem is SPECIFIC to that barrel. Examine that barrel's turn grade, approach angle, and exit drive data closely.
+All splits slow but consistent: Likely a pattern-wide issue — horse not extending on straightaways, OR rider restraining horse through entire run rather than galloping between barrels.
 
 ── SPLIT TIME INTERPRETATION ──────────────────────────────────────────────────
 Slow alley-to-first: Late to rate, approach angle too straight, wrong rate point, or alley stress.
@@ -692,6 +811,7 @@ function buildBarrelCoachingData(run, pythonResult) {
   const splits = pythonResult?.splits || {};
   const insights = Array.isArray(pythonResult?.insights) ? pythonResult.insights : [];
   const barrelLabels = { barrel1: "First", barrel2: "Second", barrel3: "Third" };
+  const barrelTimestamps = run?.barrel_location_hints || run?.manualSplits?.barrel_video_timestamps || null;
 
   const barrelReport = ["barrel1", "barrel2", "barrel3"].map(name => {
     const bm = barrelMetrics[name];
@@ -730,11 +850,31 @@ function buildBarrelCoachingData(run, pythonResult) {
   }
 
   const splitsMethod = splits?.splits_method || "unknown";
+
+  // Pre-calculate slowest/fastest splits in code — never let GPT guess
+  const splitMap = {
+    "Alley → 1st Barrel": splits?.start_to_barrel1_seconds,
+    "1st → 2nd Barrel":   splits?.barrel1_to_barrel2_seconds,
+    "2nd → 3rd Barrel":   splits?.barrel2_to_barrel3_seconds,
+    "3rd Barrel → Home":  splits?.barrel3_to_home_seconds,
+  };
+  const validSplits = Object.entries(splitMap).filter(([, v]) => v != null && Number.isFinite(Number(v)));
+  let slowestSplit = null, fastestSplit = null;
+  if (validSplits.length > 0) {
+    slowestSplit = validSplits.reduce((a, b) => Number(b[1]) > Number(a[1]) ? b : a);
+    fastestSplit = validSplits.reduce((a, b) => Number(b[1]) < Number(a[1]) ? b : a);
+  }
+  const splitAnalysisLine = slowestSplit && fastestSplit
+    ? `  - SLOWEST split: ${slowestSplit[0]} at ${slowestSplit[1]}s — THIS IS WHERE THE MOST TIME IS BEING LOST. DO NOT say any other section is slowest.
+  - FASTEST split: ${fastestSplit[0]} at ${fastestSplit[1]}s`
+    : "";
+
   const splitReport = `Split times (method: ${splitsMethod}):
   - Alley to first barrel: ${splits?.start_to_barrel1_seconds ?? "n/a"}s
   - First to second barrel: ${splits?.barrel1_to_barrel2_seconds ?? "n/a"}s
   - Second to third barrel: ${splits?.barrel2_to_barrel3_seconds ?? "n/a"}s
-  - Third barrel to home: ${splits?.barrel3_to_home_seconds ?? "n/a"}s`;
+  - Third barrel to home: ${splits?.barrel3_to_home_seconds ?? "n/a"}s
+${splitAnalysisLine}`;
 
   return `
 === COMPUTER VISION COACHING DATA ===
@@ -764,6 +904,19 @@ Run data:
 - Rider felt: "${run?.riderFeedback || "no feedback provided"}"
 - Notes: "${run?.notes || "none"}"
 - Manual splits set: ${run?.manualSplits ? "YES — user-marked splits are highly accurate" : "No"}
+${(() => {
+  const bt = run?.barrel_location_hints || run?.manualSplits?.barrel_video_timestamps;
+  if (!bt) return "- Barrel video timestamps: not available";
+  const dur = pythonResult?.duration_seconds;
+  const pct = (t) => dur ? ` (${Math.round((t/dur)*100)}% through video)` : "";
+  return [
+    "- Barrel video timestamps (rider tapped when horse reached each barrel):",
+    bt.barrel1 != null ? `  • 1st barrel reached at ${bt.barrel1.toFixed(2)}s${pct(bt.barrel1)}` : null,
+    bt.barrel2 != null ? `  • 2nd barrel reached at ${bt.barrel2.toFixed(2)}s${pct(bt.barrel2)}` : null,
+    bt.barrel3 != null ? `  • 3rd barrel reached at ${bt.barrel3.toFixed(2)}s${pct(bt.barrel3)}` : null,
+    "  These timestamps anchor WHERE each barrel is in the video. Frames around these times show the horse at each barrel.",
+  ].filter(Boolean).join("\n");
+})()}
   `.trim();
 }
 
@@ -778,7 +931,7 @@ ${BARREL_RACING_KNOWLEDGE_BASE}
 
 === YOUR TASK ===
 
-You are analyzing ${riderName}'s run on ${horseName}. You have 30 video frames covering the entire run — alley approach, all three barrel approaches, apexes, exits, and the home run. You also have detailed computer vision data.
+You are analyzing ${riderName}'s run on ${horseName}. You have up to 30 video frames covering the run — all three barrel approaches, apexes, exits, and the home run. When manual splits were set by the rider, frames are anchored precisely to each barrel timestamp. You also have detailed computer vision data.
 
 WHAT TO LOOK FOR IN THE FRAMES — check every frame carefully:
 
@@ -827,7 +980,7 @@ Return ONLY this exact JSON:
   "bestBarrel": "1st",
   "bestTurn": "2nd",
   "focusNext": "One specific actionable coaching cue — the highest priority fix",
-  "speedInsight": "Name the slowest section and explain what the data tells you about why",
+  "speedInsight": "Use the SLOWEST split already identified in the CV data above — do not recalculate. Explain specifically why that section was slow based on what you observed in the frames and CV metrics",
   "splitAnalysis": "Read each split time using the knowledge base — what does each split tell you about what happened at that barrel",
   "patternNotes": "What the approach angles, tightness grades, and exit drives tell you about how this horse runs the pattern — use proper terminology",
   "visualObservations": "What you specifically saw in the video frames — rider position, horse shoulder, hands, seat, head position. Reference what you actually saw.",
@@ -1001,7 +1154,12 @@ async function processVideoJob(jobId) {
     pythonGeneratedPaths = getPythonGeneratedPaths(pythonResult);
 
     updateJob(jobId, { progress: 55, stage: "Computer vision complete — selecting key frames" });
-    const framePaths = selectFramePaths(pythonResult.sampled_frames || [], 20);
+    const framePaths = selectFramePaths(
+      pythonResult.sampled_frames || [],
+      30,
+      job.run,
+      pythonResult.duration_seconds || null
+    );
     if (!framePaths.length) throw new Error("Python did not return any usable frame images.");
 
     updateJob(jobId, { progress: 62, stage: "Preparing frames for AI coach" });
