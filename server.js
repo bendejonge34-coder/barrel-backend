@@ -471,7 +471,7 @@ function buildImageInputs(framePaths) {
         type: "image_url",
         image_url: {
           url: `data:image/jpeg;base64,${b64}`,
-          detail: "low",
+          detail: "high",
         },
       });
     } catch (err) {
@@ -1001,7 +1001,7 @@ async function processVideoJob(jobId) {
     pythonGeneratedPaths = getPythonGeneratedPaths(pythonResult);
 
     updateJob(jobId, { progress: 55, stage: "Computer vision complete — selecting key frames" });
-    const framePaths = selectFramePaths(pythonResult.sampled_frames || [], 30);
+    const framePaths = selectFramePaths(pythonResult.sampled_frames || [], 20);
     if (!framePaths.length) throw new Error("Python did not return any usable frame images.");
 
     updateJob(jobId, { progress: 62, stage: "Preparing frames for AI coach" });
