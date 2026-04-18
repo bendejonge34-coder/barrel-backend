@@ -689,7 +689,10 @@ You are an elite barrel racing coach. Apply this knowledge to every analysis.
 ── CORE PHILOSOPHY ────────────────────────────────────────────────────────────
 "Speed is a byproduct of correctness. If you fix the mechanics, the clock will follow."
 "A great run is a conversation, not a fight. The best riders do 90% of their work in the training pen so that during the 15-second run, they can simply stay out of the horse's way."
+"In barrel racing, speed is the goal, but precision is the engine."
 The straightaways are for speed. The turns are for precision. If you don't set up the approach, you've lost the turn before you even get there.
+The "go fast to be fast" trap: Many riders push for raw speed, which results in sloppy lines and blown turns. To clock in the 1D, you have to stop fighting the clock and start working with your horse's mechanics. Consistency beats intensity every single day.
+The turn doesn't start AT the barrel — it starts 15 feet before it. Every single time.
 
 ── THE APPROACH & THE POCKET ──────────────────────────────────────────────────
 Source: "Phase 1 — The Anatomy of the Approach"
@@ -744,14 +747,21 @@ Source: "Championship Barrel Racing — The Professional Coach's Guide to Correc
 Core principle: "Speed is a byproduct of correctness. If you fix the mechanics, the clock will follow."
 
 1. DIVING INTO THE TURN (Pocket Killer #1)
-Leaning your body or pulling the horse's nose in too early, causing them to shoulder the barrel or hit it.
-What it looks like: Rider leans inward before leg reaches the barrel. Horse's inside shoulder drops and they cut the turn short.
-Fix drill: "The Square Turn" — Ride PAST the barrel until your leg is even with it, then execute a 90-degree square turn rather than a circle. This forces the horse to keep their shoulders upright and wait for the cue. Do NOT begin turning until your leg (cinch) is even with the barrel.
+The #1 pocket killer. Riders lean their body or pull the horse's nose toward the barrel too early, causing the horse to "shoulder in" — hitting the barrel or losing momentum entirely.
+What it looks like: Rider leans inward before leg reaches the barrel. Horse's inside shoulder drops and they cut the turn short. Horse may clip barrel with shoulder or rider's knee.
+Fix drill: "Square the Barrel" —
+  Execution: Approach the barrel at a TROT. Instead of riding a circle, ride a literal square around the barrel.
+  The Focus: Ride past your "point" (where you start your turn) and keep the horse's shoulders upright. Only begin the turn when you can see the BACKSIDE of the barrel.
+  Why it works: The square forces the rider to wait — you physically cannot turn early when riding a square. The horse learns to hold their shoulders until released by the rider's cue.
+  Progression: Start at a trot, then slow lope, then full speed once the habit is built.
 
 2. LOOKING AT THE BARREL
-Staring at the barrel ("tin") causes your body to tip and your horse to follow your eyes directly into a collision.
-What it looks like: Rider's head drops or turns toward barrel on approach. Body follows eyes, weight shifts inside.
-Fix drill: "The Horizon Focus" — Pick a banner or a spot on the arena fence 10 feet past the barrel. Eyes forward on approach. Don't look at the NEXT barrel until your horse's hip has cleared the current one.
+It's human nature to look at what you're trying to avoid — but in barrel racing, your horse follows your eyes. If you stare at the barrel, your body weight shifts, your shoulder drops, and the horse follows directly into a collision.
+What it looks like: Rider's head drops or turns toward barrel on approach. Body weight tips inside. Shoulder drops. Horse drifts toward the barrel.
+Fix drill: "The Look Ahead / Horizon Drill" —
+  Execution: While working at a controlled lope, focus on a spot about 10 feet PAST each barrel as you approach it.
+  The Focus: Once you are in the turn, snap your eyes immediately to the next destination — the next barrel's entry point, or the timer line if it's the last barrel. By looking where you want to go, your hips and shoulders naturally align there.
+  Key cue: Don't look at the next barrel until your horse's hip has cleared the current one. Looking too early pulls you out of the turn prematurely.
 
 3. SHOULDERS DROPPING ("Washing Out")
 Allowing the horse to drop their inside shoulder, losing leverage and power in the turn. The horse "washes out" — slips wide or knocks the barrel.
@@ -759,9 +769,15 @@ What it looks like: Horse's inside shoulder visibly drops mid-turn. Hind end swi
 Fix drill: "Counter-Bending Circles" — Circle the barrel while bending the horse's nose AWAY from the barrel. This lifts the inside shoulder and engages the hindquarters. Repeat until horse can hold the lift through the entire circle.
 
 4. OVER-HANDLING / SAWING ON THE BIT
-Using aggressive, jerky hand movements that make the horse nervous and "braced" against the bit.
-What it looks like: Rider's hands active and pulling throughout the turn. Horse's head is elevated, jaw tight, movement choppy.
-Fix drill: "Loose Rein Loping" — Lope a large circle around the barrel on a completely loose rein, using only your weight and legs to steer. Reward the horse when they hold the path. This resets the horse to respond to the seat, not the hands.
+Many riders "saw" on the bit or pull the inside rein throughout the entire turn, pulling the horse off-balance and preventing them from using their hind end to power out of the turn.
+What it looks like: Rider's hands active and pulling throughout the turn. Horse's head elevated, jaw tight, movement choppy and broken. Horse cannot drive from hindquarters because front end is being held.
+Fix drill A: "The One-Handed Guide" —
+  Execution: Set up the standard pattern and work it at a trot or slow lope using ONLY your dominant riding hand on the reins.
+  The Focus: Use your legs and seat to guide the horse's ribs and hips through each turn. This forces you to use your body to steer rather than your hands.
+  If the horse won't turn without a heavy hand: Return to basic lateral work — side-passing and leg yielding — before returning to the pattern. The problem is a training gap, not a speed problem.
+Fix drill B: "Loose Rein Loping" —
+  Execution: Lope a large circle around the barrel on a completely loose rein, using only weight and legs.
+  Reward the horse for holding the path. This resets the horse to respond to seat cues, not hand cues.
 
 5. FAILING TO FINISH THE TURN (Early Exit)
 Leaving the barrel too early, resulting in a wide exit and a poor line to the next barrel.
