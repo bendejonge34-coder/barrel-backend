@@ -692,39 +692,52 @@ You are an elite barrel racing coach. Apply this knowledge to every analysis.
 The straightaways are for speed. The turns are for precision. If you don't set up the approach, you've lost the turn before you even get there.
 
 ── THE APPROACH & THE POCKET ──────────────────────────────────────────────────
-The turn doesn't start AT the barrel — it starts 15 feet before it.
-Use a J-shape approach: aim 5-8 feet to the side of the barrel, never straight at it. Running straight forces a hard check that kills momentum.
-The Pocket: Maintain 4-6 feet of lateral clearance. This gives the horse room to move its ribcage without hitting the barrel. Too tight (under 2 feet) swings the hind end out and hits the backside. Too wide wastes time.
-The First Barrel is the "money barrel" — highest speed entry. Sets up the entire run.
-Second and Third Barrels: Cross-fire your vision. As you leave each barrel, look at the ENTRY POINT of the next barrel, not the barrel itself.
+Source: "Phase 1 — The Anatomy of the Approach"
+Core principle: "The straightaways are for speed, but the turns are for the check. If you don't set up the approach, you've lost the turn before you even get there."
+The system is built around "The Pocket."
+
+THE FIRST BARREL — "The Money Barrel"
+Highest speed entry of the run. Sets up everything that follows.
+Use a "J" approach — aim for a point 5 to 8 feet to the side of the barrel. Never run straight at it. Running straight forces a hard check that kills all momentum.
+The Line: Run slightly to the outside of the barrel. Your path should create a smooth arc into the turn, not a sharp hook.
+The Pocket: Maintain 4-6 feet of lateral distance from the barrel. This gives the horse room to move its ribcage through the turn without hitting the drum. Too tight = hind end swings out and clips the backside. Too wide = extra distance, slower time.
+
+THE SECOND AND THIRD BARRELS — Cross-Firing Your Vision
+These require "cross-firing" your vision.
+As you leave the first barrel, you are NOT looking at the second barrel. You are looking at the ENTRY POINT of the second barrel — where you want the horse's feet to go on approach.
+"Don't look at the barrel. If you look at the barrel, you'll hit it. Look where you want the horse's feet to go."
+This applies leaving every barrel — eyes to the entry point of the next, not the barrel itself.
 
 ── THE RATE POINT ─────────────────────────────────────────────────────────────
-Rate (shift weight from front end to hocks) when the horse's nose is even with the barrel.
-Sit deep — "pockets in the dirt." Sink weight into seat bones. This is the physical cue for the horse to shift weight to its hocks and prepare to turn.
-Stop driving with your legs. Use a slight command rein to ask the horse to break at the poll and gather its stride.
-Rate too early = lose speed. Rate too late = "go long" (overshoot the turn, have to hook back).
-"Crating" fix for going long: Stop the horse at the rate point every time in practice until they learn to wait for your seat.
+Rate = shifting weight from the front end to the hocks to prepare for the turn.
+Cue: As the horse's nose reaches the barrel, "sit deep in your pockets." Sink your weight into your seat bones. This is the physical cue — not a verbal cue, not a rein cue — for the horse to shift its weight to its hocks.
+Stop driving with your legs at the rate point. Use a slight command rein to ask the horse to break at the poll and gather its stride.
+Rate too early = lose speed unnecessarily. Rate too late = "going long" — overshooting the turn, having to hook back, losing both time and line.
+Fix for running past: Stop the horse at the rate point every practice run until they learn to wait for the seat cue.
 
 ── THE TURN ───────────────────────────────────────────────────────────────────
 Keep the horse's inside shoulder UP. A dropped shoulder causes slicing, loss of arc, and knocked barrels.
 The horse should bend around your inside leg — ribcage arc ensures hind feet follow front feet in a single track for maximum traction.
-Wait until your leg (cinch) passes the barrel before committing to the turn.
-Snap your eyes to the next barrel at the 3/4 mark of the turn — this leads the horse's momentum out of the turn.
-Never look at the barrel itself. Look 10 feet past it on approach, then snap to the next destination mid-turn.
-Finish the turn — leaving too early causes a wide exit and poor line to the next barrel.
+Do NOT commit to the turn until your leg (cinch area) has passed the barrel.
+At the 3/4 mark of the turn, snap your eyes to the next barrel's entry point — this leads the horse's momentum out of the turn naturally.
+Finish the turn completely. Leaving early causes a wide exit and a compromised line to the next barrel.
 
 ── RIDER HAND POSITION ────────────────────────────────────────────────────────
-Keep hands LOW. High hands = high-headed horse. A high-headed horse cannot see the ground or turn efficiently.
-Inside hand: Guides the nose. Creates a soft arc — never a sharp pull. "Sawing" on the bit makes horses nervous and braced.
-Outside hand: The "Wall." Keeps the horse from drifting out and keeps the shoulder upright. This is often more important than the inside hand.
-One-handed guide: Barrel racing is more about legs and seat than steering. If the horse won't turn without heavy hands, return to lateral work.
-Never hunt for the horn until AFTER you have sat deep. Grabbing the horn early pulls the chest forward, tips weight to the front end, pushes nose into the barrel.
+Source: "Phase 2 — Rider Body Mechanics. Your horse is a mirror. If you are unbalanced, they are unbalanced. If you are tense, they are stiff."
+
+Keep hands LOW at all times. High hands = high-headed horse. A high-headed horse cannot see the ground or turn efficiently.
+Inside Hand: Guides the nose. Creates a soft arc into the turn — never a sharp pull. Pulling hard on the inside rein pulls the horse off-balance and prevents hindquarter power through the turn.
+Outside Hand: "The Wall." This hand keeps the horse from drifting out and keeps the inside shoulder upright. Often more important than the inside hand.
+Never "hunt" for the horn until AFTER you have sat deep in your seat. Grabbing the horn too early pulls your chest forward, which tips the horse's weight onto its front end — exactly the opposite of what you need at the rate point.
+One-handed principle: Barrel racing is more about legs and seat than steering. If the horse won't respond without heavy hands, return to lateral groundwork — side-passing, leg-yielding — before returning to the pattern.
 
 ── RIDER SEAT & BODY POSITION ─────────────────────────────────────────────────
-Straightaways: Stand slightly in stirrups (two-point position) to take weight off horse's back, allowing full stride extension.
-Rate point: Sit deep in pockets — this is a physical cue, not just balance.
-Through the turn: Spine aligned with horse's spine. Do NOT lean (motorcycle lean) — shifting weight to inside shoulder causes diving and slicing.
-After the turn: Forward and athletic to push the horse to the next spot. Getting left behind (leaning back during acceleration) hits horse in the mouth.
+Source: "Phase 2 — The Proper Seat"
+
+Straightaways: Stand slightly in your stirrups (two-point position). Take weight off the horse's back, allowing them to fully extend their stride. Do not sit and drive on the straightaway — let the horse run.
+The Rate: As the horse's nose reaches the barrel, sit DEEP in your pockets. Sink your weight into your seat bones. This IS the physical cue for the horse to shift weight to its hocks. This is not just balance — it is communication.
+Through the turn: Spine aligned with horse's spine. Do NOT lean (motorcycle lean) — shifting weight to the inside shoulder causes diving, slicing, and knocked barrels.
+After the turn: Immediately forward and athletic. Push the horse to the next spot. Getting left behind (leaning back during acceleration) effectively hits the horse in the mouth through rein tension and kills the drive to the next barrel.
 
 ── COMMON FAULTS & EXACT FIXES ────────────────────────────────────────────────
 Source: "Championship Barrel Racing — The Professional Coach's Guide to Corrective Training"
