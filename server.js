@@ -447,12 +447,26 @@ function selectFramePaths(sampledFrames, maxFrames = 30) {
 }
 
 function buildImageInputs(framePaths) {
-  // Read frames one at a time to avoid loading all 30 into memory simultaneously
-  // This prevents OOM crashes on Render when processing large frame sets
+  // Read and encode frames one at a time, immediately discarding the buffer
+  // after encoding to prevent OOM on Render Standard (2GB RAM limit).
+  // GPT-4o "low" detail mode processes images at 512x512 equivalent —
+  // sending full 1080p frames wastes memory with no quality benefit.
   const inputs = [];
+  let totalBytes = 0;
+
   for (const p of framePaths) {
     try {
-      const b64 = fs.readFileSync(p).toString("base64");
+      const buf = fs.readFileSync(p);
+      totalBytes += buf.length;
+
+      // Hard stop if we are approaching memory limits
+      // Each base64 string is ~1.33x the original file size
+      if (totalBytes > 150 * 1024 * 1024) { // 150MB raw = ~200MB base64
+        console.warn(`[FRAMES] Memory limit reached at frame ${inputs.length} — stopping early`);
+        break;
+      }
+
+      const b64 = buf.toString("base64");
       inputs.push({
         type: "image_url",
         image_url: {
@@ -464,7 +478,8 @@ function buildImageInputs(framePaths) {
       console.warn("[FRAMES] Could not read frame:", p, err.message);
     }
   }
-  console.log(`[FRAMES] Loaded ${inputs.length} of ${framePaths.length} frames for GPT-4o`);
+
+  console.log(`[FRAMES] Loaded ${inputs.length}/${framePaths.length} frames — ${Math.round(totalBytes/1024/1024)}MB raw`);
   return inputs;
 }
 
@@ -991,6 +1006,7 @@ async function processVideoJob(jobId) {
 
     updateJob(jobId, { progress: 62, stage: "Preparing frames for AI coach" });
     const imageInputs = buildImageInputs(framePaths);
+    console.log(`[MEMORY] After frame load — ${imageInputs.length} frames ready for GPT-4o`);
 
     updateJob(jobId, { progress: 70, stage: "Sending to AI coach — analyzing your run" });
 
