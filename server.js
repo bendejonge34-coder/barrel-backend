@@ -103,7 +103,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 250 * 1024 * 1024 },
+  limits: { fileSize: 600 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const mime = String(file.mimetype || "").toLowerCase();
     const ext = String(path.extname(file.originalname || "")).toLowerCase();
@@ -1790,7 +1790,7 @@ app.get("/guardian-status/:userId", (req, res) => {
 
 app.use((err, _req, res, _next) => {
   if (err instanceof multer.MulterError) {
-    if (err.code === "LIMIT_FILE_SIZE") return res.status(400).json({ error: "Video is too large. Max size is 250MB." });
+    if (err.code === "LIMIT_FILE_SIZE") return res.status(400).json({ error: "Video file is too large (over 600MB). This almost always means the video was recorded in 4K or 60fps. Please switch your camera to 1080p at 30fps — a 30-second barrel run should be under 150MB." });
     return res.status(400).json({ error: err.message || "Upload failed." });
   }
   if (err) return res.status(400).json({ error: err.message || "Request failed." });
