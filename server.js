@@ -723,7 +723,7 @@ Keep the horse's inside shoulder UP. A dropped shoulder causes slicing, loss of 
 The horse should bend around your inside leg — ribcage arc ensures hind feet follow front feet in a single track for maximum traction.
 Do NOT commit to the turn until your leg (cinch area) has passed the barrel.
 At the 3/4 mark of the turn, snap your eyes to the next barrel's entry point — this leads the horse's momentum out of the turn naturally.
-Finish the turn completely. Leaving early causes a wide exit and a compromised line to the next barrel.
+Finish the turn completely. Leaving early causes a poor line to the next barrel and loses the momentum built through the apex.
 
 ── RIDER HAND POSITION ────────────────────────────────────────────────────────
 Source: "Phase 2 — Rider Body Mechanics. Your horse is a mirror. If you are unbalanced, they are unbalanced. If you are tense, they are stiff."
@@ -764,7 +764,7 @@ Fix drill: "The Look Ahead / Horizon Drill" —
   Key cue: Don't look at the next barrel until your horse's hip has cleared the current one. Looking too early pulls you out of the turn prematurely.
 
 3. SHOULDERS DROPPING ("Washing Out")
-Allowing the horse to drop their inside shoulder, losing leverage and power in the turn. The horse "washes out" — slips wide or knocks the barrel.
+Allowing the horse to drop their inside shoulder, losing leverage and power in the turn. The horse loses its arc, risking a knockdown or missed apex.
 What it looks like: Horse's inside shoulder visibly drops mid-turn. Hind end swings out. Turn loses arc and traction.
 Fix drill: "Counter-Bending Circles" — Circle the barrel while bending the horse's nose AWAY from the barrel. This lifts the inside shoulder and engages the hindquarters. Repeat until horse can hold the lift through the entire circle.
 
@@ -791,7 +791,7 @@ Fix drill: "The Pinwheel" — Set up 4 cones around a barrel at 5-foot intervals
 
 7. GETTING AHEAD OF THE HORSE
 Leaning forward over the neck before the horse has finished the turn, causing them to stumble or lose hind-end engagement.
-What it looks like: Rider's weight tips forward mid-turn or at exit. Horse's front end heavy, hindquarters disengage. Often causes horse to drift wide on exit.
+What it looks like: Rider's weight tips forward mid-turn or at exit. Horse's front end heavy, hindquarters disengage. Horse loses drive and forward momentum out of the turn.
 Fix drill: "The Deep Sit Stop" — Lope the pattern and ask for a complete stop at the backside of every barrel. You must sit DEEP in your pockets to cue the stop. This trains both horse and rider to maintain hindquarter engagement through and past the apex.
 
 8. LACK OF RATE (Running Past)
@@ -816,7 +816,7 @@ Slow alley→1st: Alley stress, wrong approach angle, failure to rate at the rig
 Slow 1st→2nd or 2nd→3rd: Horse not driving between barrels. Rider getting left behind (leaning back during acceleration). Horse still in rate mode — not extending on the straightaway. Early exit from previous barrel causing bad line.
 Slow 3rd→home: Rider not in two-point pushing forward. Horse not rated out cleanly. Fatigue. Or rider mentally "done" before the run is.
 One split dramatically slower than others: Problem is SPECIFIC to that barrel. Examine that barrel's turn grade, approach angle, and exit drive data closely.
-All splits slow but consistent: Likely a pattern-wide issue — horse not extending on straightaways, OR rider restraining horse through entire run rather than galloping between barrels.
+All splits slow but consistent: Horse not extending on straightaways, OR rider restraining horse through entire run rather than galloping between barrels.
 
 ── SPLIT TIME INTERPRETATION ──────────────────────────────────────────────────
 Slow alley-to-first: Late to rate, approach angle too straight, wrong rate point, or alley stress.
@@ -1037,7 +1037,7 @@ Return ONLY this exact JSON:
   "visualObservations": "What you specifically saw in the video frames — rider position, horse shoulder, hands, seat, head position. Reference what you actually saw.",
   "accuracyNotes": "Honest note on data quality and what you could see clearly vs what was estimated",
   "strengths": ["Specific strength tied to data or what you saw in frames", "Another specific strength with detail"],
-  "issues": ["Specific issue with barrel name, grade, and visual observation — e.g. Motorcycle lean at the second barrel — rider's upper body clearly leaning in, dropping the horse's inside shoulder (Grade D turn, 87px wide)", "Another specific issue with detail"],
+  "issues": ["Specific issue with barrel name and visual observation — e.g. Motorcycle lean at the second barrel — rider's upper body clearly leaning in, dropping the horse's inside shoulder", "Another specific issue with detail"],
   "workOns": ["Specific work-on tied to an observed problem with proper terminology", "Another targeted work-on"],
   "drills": ["Specific drill that directly addresses an observed issue — e.g. Walk and trot the pattern focusing on sitting deep the moment your horse's nose hits the barrel", "Another targeted drill tied to what you saw"]
 }
@@ -1169,13 +1169,14 @@ WHAT THIS REPORT MUST DO:
 3. HOW TO IMPROVE — Exactly 3 actionable points for their NEXT run. These must directly correspond to the 3 time-loss points above. Each improvement must be specific, executable, and reference a drill from the knowledge base if applicable. Not generic advice — tell them exactly what to work on and how.
 
 STRICT RULES:
-- Everything must be consistent — if you say time was lost at 1st to 2nd, the improvement must address that exact section
-- NEVER contradict the split data — if splits say 3rd to home was fastest, do not say they struggled there
-- NEVER comment on turn width — the AI cannot judge this from video
-- NEVER mention degrees, pixel measurements, or technical CV numbers
+- Everything must be internally consistent — if you identify a strength in one section, you CANNOT contradict it in another section. Read your entire response before finalizing.
+- NEVER comment on turn width, wide turns, or how tight/wide an approach was — camera angle and distance make this impossible to judge accurately. This is a hard rule with no exceptions.
+- NEVER contradict the split data — if a split shows a section was fast, do not say time was lost there
+- NEVER mention degrees, pixel measurements, or technical CV numbers in the coaching output
 - If arena was deep/muddy, factor that in — times in deep going are slower by nature
-- If a barrel was knocked, address which one and what likely caused it using the knowledge base
-- Reference the rider's own words when they gave feedback — they felt it, validate or correct it
+- If a barrel was knocked, address which one and what likely caused it using the knowledge base — but do NOT say the turn was "wide"
+- Reference the rider's own words when they gave feedback — validate or correct it with proper terminology
+- If you say something looked good in improvements or strengths, do NOT list it as a problem in issues
 - Return ONLY valid JSON. No markdown. No extra text.
 
 Return ONLY this JSON:
