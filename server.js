@@ -1022,6 +1022,153 @@ Return ONLY this exact JSON:
   `.trim();
 }
 
+// ─── PASS 1: Vision Pass Prompt ──────────────────────────────────────────────
+// GPT-4o sees all 60 frames. Only job: describe exactly what it sees.
+// No coaching. No drills. Just clinical visual observation per barrel.
+
+function buildVisionPassPrompt(run, pythonResult) {
+  const horseName = run?.horse || "this horse";
+  const riderName = run?.rider || "the rider";
+  const barrelMetrics = pythonResult?.barrel_metrics || {};
+  const duration = pythonResult?.duration_seconds || null;
+  const barrelTimestamps = run?.barrel_location_hints || run?.manualSplits?.barrel_video_timestamps || null;
+
+  const timestampContext = barrelTimestamps ? `
+Barrel video timestamps (rider tapped when horse reached each barrel):
+${barrelTimestamps.barrel1 != null ? `- 1st barrel: ${barrelTimestamps.barrel1.toFixed(2)}s into video` : ""}
+${barrelTimestamps.barrel2 != null ? `- 2nd barrel: ${barrelTimestamps.barrel2.toFixed(2)}s into video` : ""}
+${barrelTimestamps.barrel3 != null ? `- 3rd barrel: ${barrelTimestamps.barrel3.toFixed(2)}s into video` : ""}
+Frames are anchored to these timestamps — look for the horse at each barrel in the corresponding frames.` : "";
+
+  return `You are watching a barrel racing run by ${riderName} on ${horseName}.
+You have 60 video frames covering the entire run — approaches, apexes, exits, and the home run.
+${timestampContext}
+
+YOUR ONLY JOB: Describe EXACTLY what you see in the frames. Be a camera, not a coach.
+Do NOT give coaching advice. Do NOT mention drills. Just observe and describe precisely.
+
+Describe what you see for EACH of the three barrels separately:
+
+For EACH barrel (1st, 2nd, 3rd) describe:
+
+RIDER at the approach:
+- Body position — sitting deep or standing in stirrups?
+- Lean — centered/spine aligned, or leaning into the barrel (motorcycle lean)?
+- Hands — low and quiet, or high and pulling?
+- Eyes — looking ahead or looking at the barrel?
+- Timing — when did the rider begin to rate/sit?
+
+RIDER through the turn:
+- Did the rider stay centered or tip forward/backward?
+- Horn — did the rider grab it? When?
+- Hands — inside hand pulling or guiding? Outside hand present as a wall?
+
+HORSE at the approach:
+- Head position — up with nose out (on forehand) or breaking at poll (collected)?
+- Stride — strung out or gathered/collected as it approached?
+
+HORSE through the turn:
+- Inside shoulder — up and engaged, or dropped?
+- Ribcage — bending around the inside leg, or pushing straight through?
+- Hindquarters — engaged and driving, or trailing?
+
+HORSE at the exit:
+- Did the horse drive hard out of the barrel within 2-3 strides?
+- Or did it drift/coast out?
+
+BARREL PROXIMITY:
+- How close was the horse to the barrel?
+- Did any barrel appear disturbed or move?
+
+STRAIGHTAWAYS between barrels:
+- Was the rider in two-point (standing) to allow full stride extension?
+- Was the horse fully extending or being held back?
+
+Be specific. Reference what you actually SEE — "in the frames around the 2nd barrel, the rider's upper body is visibly tipping inward" is good. "The rider may have leaned" is not good enough.
+Write your observations as clear paragraphs, one section per barrel, then a section for the straightaways.`;
+}
+
+// ─── PASS 2: Coaching Pass Prompt ────────────────────────────────────────────
+// NO images. Gets vision observations from Pass 1 + CV data + knowledge base.
+// Only job: produce the structured coaching report.
+
+function buildCoachingPassPrompt(run, pythonResult, visionObservations) {
+  const coachingData = buildBarrelCoachingData(run, pythonResult);
+  const historicalContext = buildHistoricalContext(run);
+  const horseName = run?.horse || "this horse";
+  const riderName = run?.rider || "the rider";
+  const manualSplits = run?.manualSplits || null;
+
+  // Pre-calculate slowest/fastest splits
+  const splitMap = {
+    "Alley → 1st Barrel": manualSplits?.start_to_barrel1_seconds,
+    "1st → 2nd Barrel":   manualSplits?.barrel1_to_barrel2_seconds,
+    "2nd → 3rd Barrel":   manualSplits?.barrel2_to_barrel3_seconds,
+    "3rd Barrel → Home":  manualSplits?.barrel3_to_home_seconds,
+  };
+  const validSplits = Object.entries(splitMap).filter(([, v]) => v != null && Number.isFinite(Number(v)));
+  let slowestLabel = null, fastestLabel = null;
+  if (validSplits.length > 0) {
+    slowestLabel = validSplits.reduce((a, b) => Number(b[1]) > Number(a[1]) ? b : a)[0];
+    fastestLabel = validSplits.reduce((a, b) => Number(b[1]) < Number(a[1]) ? b : a)[0];
+  }
+
+  return `${BARREL_RACING_KNOWLEDGE_BASE}
+
+=== WHAT THE VISION AI SAW IN THE FRAMES ===
+The following observations were made by analyzing 60 video frames of this run.
+Use these observations as your primary visual evidence. Reference them directly in your coaching.
+
+${visionObservations}
+
+=== COMPUTER VISION METRICS ===
+${coachingData}
+
+=== RUN DATA ===
+- Horse: ${horseName}
+- Rider: ${riderName}
+- Official time: ${run?.time || "not provided"}s
+- Show: ${run?.showName || "not provided"}
+- Location: ${run?.location || "not provided"}
+- Arena condition: ${run?.arenaCondition || "not provided"}
+- Placing: ${run?.placing || "not provided"}
+- Rider felt: "${run?.riderFeedback || "no feedback provided"}"
+- Notes: "${run?.notes || "none"}"
+${slowestLabel ? `- SLOWEST split: ${slowestLabel} — THIS is where the most time is being lost` : ""}
+${fastestLabel ? `- Fastest split: ${fastestLabel}` : ""}
+
+${historicalContext}
+
+=== YOUR TASK ===
+You are an elite barrel racing coach. Using the vision observations above, the CV metrics, and the knowledge base, produce a structured per-barrel coaching report.
+
+RULES:
+- Reference the vision observations directly — "The vision pass noted X at the second barrel" or "What you saw was..."
+- Connect every issue to the knowledge base — fault name, what it costs, and which drill fixes it
+- Structure your report per barrel — 1st, 2nd, 3rd each get their own coaching
+- Use the rider's own feedback — address what they felt against what was actually seen
+- SLOWEST split is pre-calculated above — do not contradict it
+- Sound like a real professional coach, not a list generator
+- Every drill must connect to a specific observed problem
+- NO generic advice. Every sentence must earn its place.
+- Return ONLY valid JSON. No markdown. No extra text.
+
+Return ONLY this JSON:
+{
+  "summary": "2-3 punchy sentences. Lead with the single most important finding from what the vision AI saw. Reference the specific barrel. Sound like a real coach standing at the gate.",
+  "barrel1Coaching": "Full coaching paragraph for the 1st barrel — what the vision pass saw, what the CV data shows, what fault this matches from the knowledge base, what drill addresses it. Be specific.",
+  "barrel2Coaching": "Full coaching paragraph for the 2nd barrel — same structure.",
+  "barrel3Coaching": "Full coaching paragraph for the 3rd barrel — same structure.",
+  "speedInsight": "Reference the pre-calculated SLOWEST split. Explain specifically why that section was slow based on what the vision pass observed AND the CV metrics for that barrel.",
+  "splitAnalysis": "Walk through each split using the knowledge base interpretation. What does each split time tell you about what happened at that barrel?",
+  "patternNotes": "What the approach angles, tightness grades, exit drives, and visual observations tell you about how this horse runs the pattern. Use proper terminology.",
+  "strengths": ["Specific strength tied to what the vision pass saw — e.g. Rider maintained two-point position on the straightaway between 2nd and 3rd barrel, allowing full stride extension", "Another specific strength with visual evidence"],
+  "issues": ["Specific issue with barrel name and visual observation — e.g. Motorcycle lean at the 2nd barrel — vision pass confirmed rider upper body tipping inward, causing inside shoulder drop (Grade D turn)", "Another specific issue with visual evidence"],
+  "workOns": ["Specific work-on tied to observed problem with proper terminology", "Another targeted work-on"],
+  "drills": ["Named drill from knowledge base that directly addresses an observed issue — explain HOW to execute it", "Another named drill with execution detail"]
+}`.trim();
+}
+
 function buildTextOnlyPrompt(run) {
   const historicalContext = buildHistoricalContext(run);
   const horseName = run?.horse || "this horse";
@@ -1090,6 +1237,9 @@ function sanitizeAnalysis(parsed) {
     patternNotes: parsed.patternNotes || null,
     accuracyNotes: parsed.accuracyNotes || null,
     visualObservations: parsed.visualObservations || null,
+    barrel1Coaching: parsed.barrel1Coaching || null,
+    barrel2Coaching: parsed.barrel2Coaching || null,
+    barrel3Coaching: parsed.barrel3Coaching || null,
     strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
     issues: Array.isArray(parsed.issues) ? parsed.issues : [],
     workOns: Array.isArray(parsed.workOns) ? parsed.workOns : [],
@@ -1185,7 +1335,7 @@ async function processVideoJob(jobId) {
     updateJob(jobId, { progress: 55, stage: "Computer vision complete — selecting key frames" });
     const framePaths = selectFramePaths(
       pythonResult.sampled_frames || [],
-      30,
+      60,
       job.run,
       pythonResult.duration_seconds || null
     );
@@ -1195,36 +1345,62 @@ async function processVideoJob(jobId) {
     const imageInputs = buildImageInputs(framePaths);
     console.log(`[MEMORY] After frame load — ${imageInputs.length} frames ready for GPT-4o`);
 
-    updateJob(jobId, { progress: 70, stage: "Sending to AI coach — analyzing your run" });
+    updateJob(jobId, { progress: 70, stage: "Pass 1 — AI vision coach analyzing frames" });
 
     const latestJob = jobs.get(jobId);
     if (!latestJob) throw new Error("Job disappeared before AI analysis.");
 
-    // IMPROVEMENT #3: Upgraded from gpt-4o-mini to gpt-4o for significantly better
-    // coaching quality, reasoning depth, and barrel racing expertise.
-    const response = await openai.chat.completions.create({
+    // ── PASS 1: VISION PASS ───────────────────────────────────────────────────
+    // GPT-4o sees all 60 frames. Its ONLY job is to describe what it sees in
+    // clinical detail — rider position, horse body language, hands, seat, shoulder,
+    // lean, proximity to barrels. No coaching yet. Just raw observation.
+    const visionPrompt = buildVisionPassPrompt(latestJob.run, pythonResult);
+
+    const visionResponse = await openai.chat.completions.create({
       model: "gpt-4o",
-      max_tokens: 3000,
+      max_tokens: 2000,
       messages: [{
         role: "user",
         content: [
-          { type: "text", text: buildVideoPrompt(latestJob.run, pythonResult) },
+          { type: "text", text: visionPrompt },
           ...imageInputs,
         ],
       }],
     });
 
-    updateJob(jobId, { progress: 90, stage: "Finalizing coaching feedback" });
+    const visionObservations = visionResponse.choices?.[0]?.message?.content || "";
+    console.log(`[PASS 1] Vision observations: ${visionObservations.length} chars`);
+
+    updateJob(jobId, { progress: 82, stage: "Pass 2 — AI coach building your report" });
+
+    // ── PASS 2: COACHING PASS ─────────────────────────────────────────────────
+    // Second GPT-4o call gets the vision observations from Pass 1 + all CV data
+    // + full knowledge base. NO images — just text. Its only job is to produce
+    // the structured coaching report, connecting observations to faults and drills.
+    const coachingPrompt = buildCoachingPassPrompt(latestJob.run, pythonResult, visionObservations);
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 4000,
+      messages: [{
+        role: "user",
+        content: coachingPrompt,
+      }],
+    });
+
+    updateJob(jobId, { progress: 92, stage: "Finalizing coaching feedback" });
 
     const outputText = response.choices?.[0]?.message?.content || "";
     let parsedAnalysis;
     try {
       parsedAnalysis = parseModelJson(outputText);
+      // Inject vision observations so the app can display them
+      parsedAnalysis.visualObservations = visionObservations;
     } catch {
-      // Try to recover partial JSON
       const recovered = extractLastJsonObject(outputText);
       if (recovered && recovered.summary) {
         parsedAnalysis = recovered;
+        parsedAnalysis.visualObservations = visionObservations;
         console.warn("[VIDEO JOB] Recovered partial JSON from AI response");
       } else {
         console.error("[VIDEO JOB] Invalid AI JSON:", preview(outputText, 500));
