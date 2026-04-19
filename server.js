@@ -1029,143 +1029,109 @@ Return ONLY this exact JSON:
 function buildVisionPassPrompt(run, pythonResult) {
   const horseName = run?.horse || "this horse";
   const riderName = run?.rider || "the rider";
-  const barrelMetrics = pythonResult?.barrel_metrics || {};
-  const duration = pythonResult?.duration_seconds || null;
   const barrelTimestamps = run?.barrel_location_hints || run?.manualSplits?.barrel_video_timestamps || null;
 
   const timestampContext = barrelTimestamps ? `
-Barrel video timestamps (rider tapped when horse reached each barrel):
-${barrelTimestamps.barrel1 != null ? `- 1st barrel: ${barrelTimestamps.barrel1.toFixed(2)}s into video` : ""}
-${barrelTimestamps.barrel2 != null ? `- 2nd barrel: ${barrelTimestamps.barrel2.toFixed(2)}s into video` : ""}
-${barrelTimestamps.barrel3 != null ? `- 3rd barrel: ${barrelTimestamps.barrel3.toFixed(2)}s into video` : ""}
-Frames are anchored to these timestamps — look for the horse at each barrel in the corresponding frames.` : "";
+Barrel timestamps (when rider tapped each barrel):
+${barrelTimestamps.barrel1 != null ? `- 1st barrel: ${barrelTimestamps.barrel1.toFixed(2)}s` : ""}
+${barrelTimestamps.barrel2 != null ? `- 2nd barrel: ${barrelTimestamps.barrel2.toFixed(2)}s` : ""}
+${barrelTimestamps.barrel3 != null ? `- 3rd barrel: ${barrelTimestamps.barrel3.toFixed(2)}s` : ""}
+Frames near these times show the horse at each barrel.` : "";
 
   return `You are watching a barrel racing run by ${riderName} on ${horseName}.
-You have 60 video frames covering the entire run — approaches, apexes, exits, and the home run.
+You have 30 video frames covering the run.
 ${timestampContext}
 
-YOUR ONLY JOB: Describe EXACTLY what you see in the frames. Be a camera, not a coach.
-Do NOT give coaching advice. Do NOT mention drills. Just observe and describe precisely.
+YOUR ONLY JOB: Report exactly what you see. Be a camera, not a coach. No advice, no drills.
 
-Describe what you see for EACH of the three barrels separately:
+For each barrel and the straightaways, note:
+- Rider body position — upright or leaning in (motorcycle lean)?
+- Rider hands — low and quiet, or high and pulling?
+- Rider seat — sitting deep at the rate point or standing?
+- Horse inside shoulder — up or dropped through the turn?
+- Horse head — collected (breaking at poll) or high with nose out (on forehand)?
+- Horse exit — driving hard out or drifting/coasting?
+- Barrel proximity — tight, wide, or did any barrel appear disturbed?
+- Straightaways — rider in two-point to allow full stride?
 
-For EACH barrel (1st, 2nd, 3rd) describe:
-
-RIDER at the approach:
-- Body position — sitting deep or standing in stirrups?
-- Lean — centered/spine aligned, or leaning into the barrel (motorcycle lean)?
-- Hands — low and quiet, or high and pulling?
-- Eyes — looking ahead or looking at the barrel?
-- Timing — when did the rider begin to rate/sit?
-
-RIDER through the turn:
-- Did the rider stay centered or tip forward/backward?
-- Horn — did the rider grab it? When?
-- Hands — inside hand pulling or guiding? Outside hand present as a wall?
-
-HORSE at the approach:
-- Head position — up with nose out (on forehand) or breaking at poll (collected)?
-- Stride — strung out or gathered/collected as it approached?
-
-HORSE through the turn:
-- Inside shoulder — up and engaged, or dropped?
-- Ribcage — bending around the inside leg, or pushing straight through?
-- Hindquarters — engaged and driving, or trailing?
-
-HORSE at the exit:
-- Did the horse drive hard out of the barrel within 2-3 strides?
-- Or did it drift/coast out?
-
-BARREL PROXIMITY:
-- How close was the horse to the barrel?
-- Did any barrel appear disturbed or move?
-
-STRAIGHTAWAYS between barrels:
-- Was the rider in two-point (standing) to allow full stride extension?
-- Was the horse fully extending or being held back?
-
-Be specific. Reference what you actually SEE — "in the frames around the 2nd barrel, the rider's upper body is visibly tipping inward" is good. "The rider may have leaned" is not good enough.
-Write your observations as clear paragraphs, one section per barrel, then a section for the straightaways.`;
+Be specific and factual. Only report what you can clearly see. If you cannot see something clearly, say so.
+Write 3-5 sentences per barrel. Keep it concise.`;
 }
 
 // ─── PASS 2: Coaching Pass Prompt ────────────────────────────────────────────
 // NO images. Gets vision observations from Pass 1 + CV data + knowledge base.
-// Only job: produce the structured coaching report.
+// Produces short, accurate, factual report. No per-barrel sections. No degrees.
 
 function buildCoachingPassPrompt(run, pythonResult, visionObservations) {
   const coachingData = buildBarrelCoachingData(run, pythonResult);
-  const historicalContext = buildHistoricalContext(run);
   const horseName = run?.horse || "this horse";
   const riderName = run?.rider || "the rider";
   const manualSplits = run?.manualSplits || null;
 
-  // Pre-calculate slowest/fastest splits
+  // Pre-calculate slowest split in code — never let GPT guess
   const splitMap = {
-    "Alley → 1st Barrel": manualSplits?.start_to_barrel1_seconds,
-    "1st → 2nd Barrel":   manualSplits?.barrel1_to_barrel2_seconds,
-    "2nd → 3rd Barrel":   manualSplits?.barrel2_to_barrel3_seconds,
-    "3rd Barrel → Home":  manualSplits?.barrel3_to_home_seconds,
+    "Alley to 1st Barrel": manualSplits?.start_to_barrel1_seconds,
+    "1st to 2nd Barrel":   manualSplits?.barrel1_to_barrel2_seconds,
+    "2nd to 3rd Barrel":   manualSplits?.barrel2_to_barrel3_seconds,
+    "3rd Barrel to Home":  manualSplits?.barrel3_to_home_seconds,
   };
   const validSplits = Object.entries(splitMap).filter(([, v]) => v != null && Number.isFinite(Number(v)));
-  let slowestLabel = null, fastestLabel = null;
+  let slowestLabel = null;
   if (validSplits.length > 0) {
     slowestLabel = validSplits.reduce((a, b) => Number(b[1]) > Number(a[1]) ? b : a)[0];
-    fastestLabel = validSplits.reduce((a, b) => Number(b[1]) < Number(a[1]) ? b : a)[0];
   }
 
   return `${BARREL_RACING_KNOWLEDGE_BASE}
 
-=== WHAT THE VISION AI SAW IN THE FRAMES ===
-The following observations were made by analyzing 60 video frames of this run.
-Use these observations as your primary visual evidence. Reference them directly in your coaching.
-
+=== WHAT THE VISION AI SAW ===
 ${visionObservations}
 
-=== COMPUTER VISION METRICS ===
+=== CV METRICS ===
 ${coachingData}
 
 === RUN DATA ===
-- Horse: ${horseName}
-- Rider: ${riderName}
+- Horse: ${horseName} | Rider: ${riderName}
 - Official time: ${run?.time || "not provided"}s
-- Show: ${run?.showName || "not provided"}
-- Location: ${run?.location || "not provided"}
-- Arena condition: ${run?.arenaCondition || "not provided"}
-- Placing: ${run?.placing || "not provided"}
+- Arena: ${run?.arenaCondition || "not provided"}
 - Rider felt: "${run?.riderFeedback || "no feedback provided"}"
-- Notes: "${run?.notes || "none"}"
-${slowestLabel ? `- SLOWEST split: ${slowestLabel} — THIS is where the most time is being lost` : ""}
-${fastestLabel ? `- Fastest split: ${fastestLabel}` : ""}
-
-${historicalContext}
+${slowestLabel ? `- SLOWEST split: ${slowestLabel}` : ""}
 
 === YOUR TASK ===
-You are an elite barrel racing coach. Using the vision observations above, the CV metrics, and the knowledge base, produce a structured per-barrel coaching report.
+You are an elite barrel racing coach. Produce a SHORT, ACCURATE, FACTUAL coaching report.
 
-RULES:
-- Reference the vision observations directly — "The vision pass noted X at the second barrel" or "What you saw was..."
-- Connect every issue to the knowledge base — fault name, what it costs, and which drill fixes it
-- Structure your report per barrel — 1st, 2nd, 3rd each get their own coaching
-- Use the rider's own feedback — address what they felt against what was actually seen
-- SLOWEST split is pre-calculated above — do not contradict it
-- Sound like a real professional coach, not a list generator
-- Every drill must connect to a specific observed problem
-- NO generic advice. Every sentence must earn its place.
+STRICT RULES:
+- Base EVERYTHING on what the vision AI actually saw and the CV metrics. Do not invent observations.
+- NEVER mention degrees, pixel measurements, or technical CV numbers in the report
+- NEVER use per-barrel sections — no "1st Barrel:", "2nd Barrel:" headers
+- If nothing bad was observed, say so honestly — do not manufacture issues
+- If you cannot see something clearly from the frames, do not guess
+- Maximum 2 drills — only prescribe a drill if you saw the specific fault it fixes
+- Keep every field concise — riders read this at the barn, not a classroom
 - Return ONLY valid JSON. No markdown. No extra text.
 
 Return ONLY this JSON:
 {
-  "summary": "2-3 punchy sentences. Lead with the single most important finding from what the vision AI saw. Reference the specific barrel. Sound like a real coach standing at the gate.",
-  "barrel1Coaching": "Full coaching paragraph for the 1st barrel — what the vision pass saw, what the CV data shows, what fault this matches from the knowledge base, what drill addresses it. Be specific.",
-  "barrel2Coaching": "Full coaching paragraph for the 2nd barrel — same structure.",
-  "barrel3Coaching": "Full coaching paragraph for the 3rd barrel — same structure.",
-  "speedInsight": "Reference the pre-calculated SLOWEST split. Explain specifically why that section was slow based on what the vision pass observed AND the CV metrics for that barrel.",
-  "splitAnalysis": "Walk through each split using the knowledge base interpretation. What does each split time tell you about what happened at that barrel?",
-  "patternNotes": "What the approach angles, tightness grades, exit drives, and visual observations tell you about how this horse runs the pattern. Use proper terminology.",
-  "strengths": ["Specific strength tied to what the vision pass saw — e.g. Rider maintained two-point position on the straightaway between 2nd and 3rd barrel, allowing full stride extension", "Another specific strength with visual evidence"],
-  "issues": ["Specific issue with barrel name and visual observation — e.g. Motorcycle lean at the 2nd barrel — vision pass confirmed rider upper body tipping inward, causing inside shoulder drop (Grade D turn)", "Another specific issue with visual evidence"],
-  "workOns": ["Specific work-on tied to observed problem with proper terminology", "Another targeted work-on"],
-  "drills": ["Named drill from knowledge base that directly addresses an observed issue — explain HOW to execute it", "Another named drill with execution detail"]
+  "summary": "2-3 sentences max. The single most important takeaway from this run. What the coach noticed first. Sound like a real person at the gate, not a report generator.",
+  "observations": [
+    "Factual observation 1 — something the vision AI clearly saw. One sentence. Specific barrel if relevant.",
+    "Factual observation 2 — another specific thing seen. Only include if genuinely observed.",
+    "Factual observation 3",
+    "Factual observation 4",
+    "Factual observation 5 — if you only have 3 real observations, only include 3. Do not pad."
+  ],
+  "strengths": [
+    "Something that genuinely looked good — specific and visual. If nothing stood out say so.",
+    "Second strength if genuinely observed",
+    "Third strength if genuinely observed — max 3, min 0"
+  ],
+  "issues": [
+    "A real issue clearly seen — name it with proper barrel racing terminology, explain what it costs. If nothing bad was seen, return an empty array.",
+    "Second issue if genuinely observed — max 3, min 0"
+  ],
+  "drills": [
+    "Named drill from the knowledge base tied directly to an observed issue. Include brief execution instruction. Only if a specific fault was seen.",
+    "Second drill if a second specific fault was observed — max 2, min 0"
+  ]
 }`.trim();
 }
 
@@ -1203,22 +1169,30 @@ THIS RUN:
 
 ${historicalContext}
 
-Return ONLY this JSON:
+STRICT RULES:
+- Base everything on what the rider told you they felt and their run data
+- If nothing bad is reported, say so — do not manufacture issues
+- No degrees, no technical CV numbers
+- Keep every field short and useful
+- Return ONLY valid JSON. No markdown. No extra text.
 
+Return ONLY this JSON:
 {
-  "summary": "2-3 sentences at the gate. Reference rider's own feedback with proper barrel racing terminology.",
-  "bestBarrel": "1st",
-  "bestTurn": "2nd",
-  "focusNext": "The single most important coaching cue using proper terminology",
-  "speedInsight": "Where time is likely being lost — use the knowledge base to explain why",
-  "splitAnalysis": "Read this time in context of their history using knowledge base interpretation",
-  "patternNotes": "Based on rider feedback and history — what pattern tendencies are showing up, explained with proper terminology",
-  "visualObservations": "No video available — note this field is based on rider feedback only",
-  "accuracyNotes": "Coaching from rider feedback and history only — no video data",
-  "strengths": ["Specific strength from feedback or history", "Another specific strength"],
-  "issues": ["Specific issue using proper barrel racing terminology", "Another specific issue"],
-  "workOns": ["Specific work-on with proper terminology", "Another targeted work-on"],
-  "drills": ["Specific drill tied to their stated problem", "Another targeted drill"]
+  "summary": "2-3 sentences. The most important takeaway based on their time and what they felt. Sound like a real coach.",
+  "observations": [
+    "Observation based on rider feedback or run data — specific and factual",
+    "Second observation if genuinely supported by their feedback",
+    "Third observation — only include what is actually supported. Fewer is fine."
+  ],
+  "strengths": [
+    "Something genuinely positive from their feedback or run data — max 3, min 0"
+  ],
+  "issues": [
+    "Real issue from their feedback using proper barrel racing terminology — max 3, min 0. If nothing bad reported, return empty array."
+  ],
+  "drills": [
+    "Named drill from knowledge base tied to a specific reported problem — max 2, min 0"
+  ]
 }
   `.trim();
 }
@@ -1229,21 +1203,15 @@ Return ONLY this JSON:
 function sanitizeAnalysis(parsed) {
   return {
     summary: parsed.summary || "",
-    bestBarrel: parsed.bestBarrel || null,
-    bestTurn: parsed.bestTurn || null,
-    focusNext: parsed.focusNext || null,
+    observations: Array.isArray(parsed.observations) ? parsed.observations : [],
+    strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
+    issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+    drills: Array.isArray(parsed.drills) ? parsed.drills : [],
+    // Legacy fields kept for backward compat with old saved analyses
+    visualObservations: parsed.visualObservations || null,
     speedInsight: parsed.speedInsight || null,
     splitAnalysis: parsed.splitAnalysis || null,
     patternNotes: parsed.patternNotes || null,
-    accuracyNotes: parsed.accuracyNotes || null,
-    visualObservations: parsed.visualObservations || null,
-    barrel1Coaching: parsed.barrel1Coaching || null,
-    barrel2Coaching: parsed.barrel2Coaching || null,
-    barrel3Coaching: parsed.barrel3Coaching || null,
-    strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
-    issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-    workOns: Array.isArray(parsed.workOns) ? parsed.workOns : [],
-    drills: Array.isArray(parsed.drills) ? parsed.drills : [],
   };
 }
 
@@ -1335,7 +1303,7 @@ async function processVideoJob(jobId) {
     updateJob(jobId, { progress: 55, stage: "Computer vision complete — selecting key frames" });
     const framePaths = selectFramePaths(
       pythonResult.sampled_frames || [],
-      60,
+      30,
       job.run,
       pythonResult.duration_seconds || null
     );
