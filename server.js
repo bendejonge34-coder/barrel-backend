@@ -703,7 +703,7 @@ THE FIRST BARREL — "The Money Barrel"
 Highest speed entry of the run. Sets up everything that follows.
 Use a "J" approach — aim for a point 5 to 8 feet to the side of the barrel. Never run straight at it. Running straight forces a hard check that kills all momentum.
 The Line: Run slightly to the outside of the barrel. Your path should create a smooth arc into the turn, not a sharp hook.
-The Pocket: Maintain 4-6 feet of lateral distance from the barrel. This gives the horse room to move its ribcage through the turn without hitting the drum. Too tight = hind end swings out and clips the backside. Too wide = extra distance, slower time.
+The Pocket: The horse needs enough room to arc its ribcage cleanly through the turn. Too tight = hind end clips the backside of the barrel.
 
 THE SECOND AND THIRD BARRELS — Cross-Firing Your Vision
 These require "cross-firing" your vision.
@@ -781,13 +781,13 @@ Fix drill B: "Loose Rein Loping" —
 
 5. FAILING TO FINISH THE TURN (Early Exit)
 Leaving the barrel too early, resulting in a wide exit and a poor line to the next barrel.
-What it looks like: Horse and rider peel away from the barrel before the turn is complete. Exit angle is wide. Next approach is compromised.
+What it looks like: Horse and rider peel away from the barrel before the turn is complete. Next approach is compromised because the turn was not finished.
 Fix drill: "The One-and-a-Half" — Make a full circle around the barrel PLUS another half-turn before heading to the next. This teaches the horse to keep turning until specifically told to leave. Builds patience and finish through the turn.
 
-6. IMPROPER POCKET SIZING
-Entering too tight or too wide, ruining the approach angle and momentum.
-What it looks like: Too tight = horse clips barrel with shoulder or hind end. Too wide = horse has to hook back, losing speed and line.
-Fix drill: "The Pinwheel" — Set up 4 cones around a barrel at 5-foot intervals. Practice spiraling in and out of the cones at a trot to master spatial awareness of your "pocket." Ideal pocket = 4-6 feet of clearance.
+6. IMPROPER POCKET — RUNNING TOO TIGHT
+Horse clips the barrel with shoulder, hip, or hind end. Often caused by diving too early, dropped inside shoulder, or poor approach angle.
+What it looks like: Horse brushes or knocks the barrel. Hind end swings into the backside.
+Fix drill: "The Pinwheel" — Set up 4 cones around a barrel at 5-foot intervals. Practice spiraling in and out at a trot to master barrel awareness.
 
 7. GETTING AHEAD OF THE HORSE
 Leaning forward over the neck before the horse has finished the turn, causing them to stumble or lose hind-end engagement.
@@ -823,7 +823,7 @@ Slow alley-to-first: Late to rate, approach angle too straight, wrong rate point
 Slow first-to-second or second-to-third: Horse not driving between barrels. Rider sitting back (getting left behind), horse still in rate mode, not extending on the straightaway.
 Slow third-to-home: Horse not rated out cleanly, tired, or rider not in two-point pushing forward.
 One slow split vs others: Problem is specific to that barrel — check turn grade, approach angle, and exit drive data for that barrel specifically.
-A run that feels fast but clocks slow = wide turns. A run that feels slow but clocks well = tight, efficient turns.
+A run that feels fast but clocks slow = time is being lost in the turns or straightaways — check exit drive and approach efficiency.
 
 ── HORSE BODY MECHANICS ───────────────────────────────────────────────────────
 Inside shoulder dropped = slicing the turn, loss of arc, likely knockdown.
@@ -878,31 +878,53 @@ function buildBarrelCoachingData(run, pythonResult) {
     speedReport = lines.join("\n");
   }
 
-  const splitsMethod = splits?.splits_method || "unknown";
+  // Always prefer manual splits (already scaled to official time) over CV splits
+  // CV splits are raw video estimates — manual splits are ground truth
+  const manualSplits = run?.manualSplits || null;
+  const activeSplits = manualSplits || splits || {};
+  const splitsSource = manualSplits ? "user-marked and scaled to official time" : "CV-estimated";
 
-  // Pre-calculate slowest/fastest splits in code — never let GPT guess
-  const splitMap = {
-    "Alley → 1st Barrel": splits?.start_to_barrel1_seconds,
-    "1st → 2nd Barrel":   splits?.barrel1_to_barrel2_seconds,
-    "2nd → 3rd Barrel":   splits?.barrel2_to_barrel3_seconds,
-    "3rd Barrel → Home":  splits?.barrel3_to_home_seconds,
+  // Scale CV splits to official time if no manual splits available
+  let s1 = activeSplits?.start_to_barrel1_seconds ?? null;
+  let s2 = activeSplits?.barrel1_to_barrel2_seconds ?? null;
+  let s3 = activeSplits?.barrel2_to_barrel3_seconds ?? null;
+  let s4 = activeSplits?.barrel3_to_home_seconds ?? null;
+
+  // If using CV splits, scale them to the official run time
+  if (!manualSplits && run?.time) {
+    const officialTime = parseFloat(run.time);
+    const cvTotal = [s1, s2, s3, s4].reduce((sum, v) => sum + (Number.isFinite(Number(v)) ? Number(v) : 0), 0);
+    if (cvTotal > 0 && officialTime > 0 && Math.abs(cvTotal - officialTime) > 0.1) {
+      const scale = officialTime / cvTotal;
+      if (s1 != null) s1 = parseFloat((Number(s1) * scale).toFixed(2));
+      if (s2 != null) s2 = parseFloat((Number(s2) * scale).toFixed(2));
+      if (s3 != null) s3 = parseFloat((Number(s3) * scale).toFixed(2));
+      if (s4 != null) s4 = parseFloat((Number(s4) * scale).toFixed(2));
+    }
+  }
+
+  const splitMapFinal = {
+    "Alley to 1st Barrel": s1,
+    "1st to 2nd Barrel":   s2,
+    "2nd to 3rd Barrel":   s3,
+    "3rd Barrel to Home":  s4,
   };
-  const validSplits = Object.entries(splitMap).filter(([, v]) => v != null && Number.isFinite(Number(v)));
+  const validSplitsFinal = Object.entries(splitMapFinal).filter(([, v]) => v != null && Number.isFinite(Number(v)));
   let slowestSplit = null, fastestSplit = null;
-  if (validSplits.length > 0) {
-    slowestSplit = validSplits.reduce((a, b) => Number(b[1]) > Number(a[1]) ? b : a);
-    fastestSplit = validSplits.reduce((a, b) => Number(b[1]) < Number(a[1]) ? b : a);
+  if (validSplitsFinal.length > 0) {
+    slowestSplit = validSplitsFinal.reduce((a, b) => Number(b[1]) > Number(a[1]) ? b : a);
+    fastestSplit = validSplitsFinal.reduce((a, b) => Number(b[1]) < Number(a[1]) ? b : a);
   }
   const splitAnalysisLine = slowestSplit && fastestSplit
-    ? `  - SLOWEST split: ${slowestSplit[0]} at ${slowestSplit[1]}s — THIS IS WHERE THE MOST TIME IS BEING LOST. DO NOT say any other section is slowest.
+    ? `  - SLOWEST split: ${slowestSplit[0]} at ${slowestSplit[1]}s — THIS IS WHERE THE MOST TIME IS BEING LOST.
   - FASTEST split: ${fastestSplit[0]} at ${fastestSplit[1]}s`
     : "";
 
-  const splitReport = `Split times (method: ${splitsMethod}):
-  - Alley to first barrel: ${splits?.start_to_barrel1_seconds ?? "n/a"}s
-  - First to second barrel: ${splits?.barrel1_to_barrel2_seconds ?? "n/a"}s
-  - Second to third barrel: ${splits?.barrel2_to_barrel3_seconds ?? "n/a"}s
-  - Third barrel to home: ${splits?.barrel3_to_home_seconds ?? "n/a"}s
+  const splitReport = `Split times (${splitsSource}):
+  - Alley to 1st barrel: ${s1 ?? "n/a"}s
+  - 1st to 2nd barrel: ${s2 ?? "n/a"}s
+  - 2nd to 3rd barrel: ${s3 ?? "n/a"}s
+  - 3rd barrel to home: ${s4 ?? "n/a"}s
 ${splitAnalysisLine}`;
 
   return `
@@ -980,7 +1002,7 @@ HORSE POSITION:
 - Does the horse look balanced and collected approaching each barrel, or strung out?
 
 BARREL PROXIMITY:
-- Is the horse running too wide (losing time) or dangerously tight?
+- Did the horse appear at risk of clipping any barrel (running dangerously tight)?
 - Did any barrel appear disturbed or moved?
 
 COACHING RULES:
@@ -1051,7 +1073,7 @@ For each barrel and the straightaways, note:
 - Horse inside shoulder — up or dropped through the turn?
 - Horse head — collected (breaking at poll) or high with nose out (on forehand)?
 - Horse exit — driving hard out or drifting/coasting?
-- Barrel proximity — tight, wide, or did any barrel appear disturbed?
+- Barrel proximity — did the horse appear dangerously close to (at risk of clipping) any barrel? Did any barrel appear disturbed or knocked?
 - Straightaways — rider in two-point to allow full stride?
 
 Be specific and factual. Only report what you can clearly see. If you cannot see something clearly, say so.
@@ -1068,80 +1090,110 @@ function buildCoachingPassPrompt(run, pythonResult, visionObservations) {
   const riderName = run?.rider || "the rider";
   const manualSplits = run?.manualSplits || null;
 
-  // Pre-calculate slowest split in code — never let GPT guess
-  const splitMap = {
-    "Alley to 1st Barrel": manualSplits?.start_to_barrel1_seconds,
-    "1st to 2nd Barrel":   manualSplits?.barrel1_to_barrel2_seconds,
-    "2nd to 3rd Barrel":   manualSplits?.barrel2_to_barrel3_seconds,
-    "3rd Barrel to Home":  manualSplits?.barrel3_to_home_seconds,
-  };
-  const validSplits = Object.entries(splitMap).filter(([, v]) => v != null && Number.isFinite(Number(v)));
-  let slowestLabel = null;
-  if (validSplits.length > 0) {
-    slowestLabel = validSplits.reduce((a, b) => Number(b[1]) > Number(a[1]) ? b : a)[0];
+  // Use manual splits if available (already scaled to official time in the app)
+  // Fall back to CV splits and scale them to official time if needed
+  const cvSplits = pythonResult?.splits || {};
+  const rawSplits = manualSplits || cvSplits;
+  let sp1 = rawSplits?.start_to_barrel1_seconds ?? null;
+  let sp2 = rawSplits?.barrel1_to_barrel2_seconds ?? null;
+  let sp3 = rawSplits?.barrel2_to_barrel3_seconds ?? null;
+  let sp4 = rawSplits?.barrel3_to_home_seconds ?? null;
+
+  // If using CV splits (no manual), scale to official time
+  if (!manualSplits && baseTime > 0) {
+    const cvTotal = [sp1, sp2, sp3, sp4].reduce((sum, v) => sum + (Number.isFinite(Number(v)) ? Number(v) : 0), 0);
+    if (cvTotal > 0 && Math.abs(cvTotal - baseTime) > 0.1) {
+      const scale = baseTime / cvTotal;
+      if (sp1 != null) sp1 = parseFloat((Number(sp1) * scale).toFixed(2));
+      if (sp2 != null) sp2 = parseFloat((Number(sp2) * scale).toFixed(2));
+      if (sp3 != null) sp3 = parseFloat((Number(sp3) * scale).toFixed(2));
+      if (sp4 != null) sp4 = parseFloat((Number(sp4) * scale).toFixed(2));
+    }
   }
+
+  const splitMap = {
+    "Alley to 1st Barrel": sp1,
+    "1st to 2nd Barrel":   sp2,
+    "2nd to 3rd Barrel":   sp3,
+    "3rd Barrel to Home":  sp4,
+  };
+  const validSplits = Object.entries(splitMap)
+    .filter(([, v]) => v != null && Number.isFinite(Number(v)))
+    .sort((a, b) => Number(b[1]) - Number(a[1]));
+  const slowestSplit = validSplits[0] || null;
+  const fastestSplit = validSplits[validSplits.length - 1] || null;
+  const hasSplits = validSplits.length > 0;
+  const splitsLabel = manualSplits ? "user-marked, scaled to official time" : "CV-estimated, scaled to official time";
+
+  // Penalty time calculation
+  const baseTime = parseFloat(run?.time) || 0;
+  const penaltySeconds = run?.knockedPenalty === "+5" && run?.knockedBarrels?.length > 0
+    ? run.knockedBarrels.length * 5 : 0;
+  const officialTime = baseTime + penaltySeconds;
 
   return `${BARREL_RACING_KNOWLEDGE_BASE}
 
 === WHAT THE VISION AI SAW ===
 ${visionObservations}
 
-=== CV METRICS ===
+=== CV METRICS (reference only — do not quote numbers directly) ===
 ${coachingData}
 
-=== RUN DATA — USE ALL OF THIS IN YOUR ANALYSIS ===
-- Horse: ${horseName} | Rider: ${riderName}
-- Official time: ${run?.time ? run.time + "s" : "No time recorded"}
-- Show: ${run?.showName || "not provided"}
-- Date: ${run?.runDate || "not provided"}
-- Location: ${run?.location || "not provided"}
-- Arena condition: ${run?.arenaCondition || "not provided"}
-- Placing: ${run?.placing || "not provided"}
-- Earnings: ${run?.earnings ? "$" + run.earnings : "not provided"}
-- Knocked down barrels: ${run?.knockedBarrels && run.knockedBarrels.length > 0
-  ? run.knockedBarrels.map(b => `Barrel ${b}`).join(", ") + (
-      run.knockedPenalty === "nt" ? " — N-T (no time recorded due to knockdown)"
-      : run.knockedPenalty === "+5" ? ` — +${run.knockedBarrels.length * 5}s penalty added`
-      : " — knocked"
-    )
-  : "none reported"}
-- Rider felt: "${run?.riderFeedback || "no feedback provided"}"
-- Notes: "${run?.notes || "none"}"
-${slowestLabel ? `- SLOWEST split: ${slowestLabel}` : ""}
+=== RUN DATA ===
+Horse: ${horseName} | Rider: ${riderName}
+Official time: ${run?.knockedPenalty === "nt" ? "N-T (no time — barrel knocked)" : officialTime > 0 ? officialTime.toFixed(2) + "s" + (penaltySeconds > 0 ? ` (includes +${penaltySeconds}s penalty)` : "") : "not recorded"}
+Show: ${run?.showName || "—"} | Date: ${run?.runDate || "—"} | Location: ${run?.location || "—"}
+Arena condition: ${run?.arenaCondition || "not provided"}
+Placing: ${run?.placing || "—"} | Earnings: ${run?.earnings ? "$" + run.earnings : "—"}
+Knocked barrels: ${run?.knockedBarrels?.length > 0 ? `Barrel ${run.knockedBarrels.join(", ")} — ${run.knockedPenalty === "nt" ? "N-T" : `+${run.knockedBarrels.length * 5}s penalty`}` : "none"}
+Rider felt: "${run?.riderFeedback || "no feedback entered"}"
+Notes: "${run?.notes || "none"}"
+${hasSplits ? `
+SPLIT TIMES (${splitsLabel} — treat as ground truth):
+${validSplits.map(([label, val]) => `  ${label}: ${Number(val).toFixed(2)}s`).join("
+")}
+SLOWEST section: ${slowestSplit[0]} at ${Number(slowestSplit[1]).toFixed(2)}s — THIS is where the most time was lost
+FASTEST section: ${fastestSplit[0]} at ${Number(fastestSplit[1]).toFixed(2)}s
+These splits are proportionally correct relative to the official time — do not question or recalculate them.` : "No split data available."}
 
-=== YOUR TASK ===
-You are an elite barrel racing coach. Produce a SHORT, ACCURATE, FACTUAL coaching report.
+=== YOUR JOB ===
+You are an elite barrel racing coach reviewing this run. Build your entire report around the data above.
+The split times, rider feedback, arena condition, and notes are the most reliable data you have — use them.
+The vision AI observations are secondary — only reference them if they clearly support something in the data.
+
+WHAT THIS REPORT MUST DO:
+1. SUMMARY — Write 2-3 sentences that feel like a coach talking at the gate. Reference the actual time and the most significant thing about this run (a split, a knocked barrel, what the rider felt). Be specific, not generic.
+
+2. WHERE TIME WAS LOST — Exactly 3 points. Each must identify a specific moment in the run where time was lost and explain WHY using barrel racing knowledge. Base these on the split times if available. If a barrel was knocked, that is one of the 3. If the rider reported feeling something, connect it to a specific section. Do not invent — if you can only identify 2 real time losses, say so honestly and give 2.
+
+3. HOW TO IMPROVE — Exactly 3 actionable points for their NEXT run. These must directly correspond to the 3 time-loss points above. Each improvement must be specific, executable, and reference a drill from the knowledge base if applicable. Not generic advice — tell them exactly what to work on and how.
 
 STRICT RULES:
-- Reference the rider's actual time, arena condition, notes, and feedback directly in your analysis
-- If barrels were knocked down, address that specifically — which barrel, what likely caused it
-- If arena condition is noted (deep, hard, muddy etc) factor that into your coaching
-- If rider left notes or feedback, address those feelings directly using proper terminology
-- Base visual observations ONLY on what the vision AI clearly saw — do not guess
+- Everything must be consistent — if you say time was lost at 1st to 2nd, the improvement must address that exact section
+- NEVER contradict the split data — if splits say 3rd to home was fastest, do not say they struggled there
+- NEVER comment on turn width — the AI cannot judge this from video
 - NEVER mention degrees, pixel measurements, or technical CV numbers
-- NEVER use per-barrel section headers
-- Exactly 3 observations — no more, no less. Make them count.
-- If nothing bad was observed, say so honestly — do not manufacture issues
-- Maximum 2 drills — only if a specific fault was seen or reported
-- Keep it short — riders read this at the barn
+- If arena was deep/muddy, factor that in — times in deep going are slower by nature
+- If a barrel was knocked, address which one and what likely caused it using the knowledge base
+- Reference the rider's own words when they gave feedback — they felt it, validate or correct it
 - Return ONLY valid JSON. No markdown. No extra text.
 
 Return ONLY this JSON:
 {
-  "summary": "2-3 sentences. Reference the actual time, show/location if provided, and the single most important finding. Sound like a real coach at the gate.",
-  "observations": [
-    "Observation 1 — factual, specific, references run data or what was clearly seen. One sentence.",
-    "Observation 2 — another specific finding. Reference arena condition, rider feedback, or visual evidence.",
-    "Observation 3 — third specific point. If barrels were knocked, address here."
+  "summary": "2-3 sentences. Specific to THIS run — reference the time, the show or location if given, the most important finding. Sound like a real person, not a report.",
+  "timeLost": [
+    "Time loss 1 — identify the specific section or moment, explain why time was lost there using barrel racing terminology. One clear sentence.",
+    "Time loss 2 — another specific moment. Must be based on splits, rider feedback, knocked barrel, or clear visual evidence.",
+    "Time loss 3 — third specific moment. If you cannot identify 3 genuine time losses, return only what you can honestly support."
   ],
-  "strengths": [
-    "Genuine strength — specific and supported by evidence. Max 3, min 0."
-  ],
-  "issues": [
-    "Real issue with proper barrel racing terminology. If nothing bad seen or reported, return empty array. Max 3."
+  "improvements": [
+    "Improvement 1 — directly addresses time loss 1. Specific and actionable. Reference a named drill if applicable.",
+    "Improvement 2 — directly addresses time loss 2. Tell them exactly what to practice.",
+    "Improvement 3 — directly addresses time loss 3. Executable at their next training session."
   ],
   "drills": [
-    "Named drill tied to a specific observed or reported fault. Brief execution note. Max 2, min 0."
+    "Named drill from knowledge base with brief execution instruction — tied to a specific problem identified above. Max 2.",
+    "Second drill if a second specific fault was identified."
   ]
 }`.trim();
 }
@@ -1181,28 +1233,28 @@ THIS RUN:
 ${historicalContext}
 
 STRICT RULES:
-- Base everything on what the rider told you they felt and their run data
-- If nothing bad is reported, say so — do not manufacture issues
-- No degrees, no technical CV numbers
-- Keep every field short and useful
+- Build the entire report around the rider's data — time, splits, feedback, arena, knocked barrels
+- NEVER contradict the data — if splits show a section was fast, do not say time was lost there
+- NEVER invent problems — only identify real time losses supported by data
+- No degrees, no technical numbers
 - Return ONLY valid JSON. No markdown. No extra text.
 
 Return ONLY this JSON:
 {
-  "summary": "2-3 sentences. The most important takeaway based on their time and what they felt. Sound like a real coach.",
-  "observations": [
-    "Observation based on rider feedback or run data — specific and factual",
-    "Second observation if genuinely supported by their feedback",
-    "Third observation — only include what is actually supported. Fewer is fine."
+  "summary": "2-3 sentences. Reference the actual time, show/location, and the most important thing about this run. Sound like a real coach at the gate.",
+  "timeLost": [
+    "Specific moment where time was lost — identify the section, explain why using barrel racing terminology. Base on splits or rider feedback.",
+    "Second time loss — must be genuinely supported by data. If only 2 real losses, return 2.",
+    "Third time loss — if barrel was knocked, include here."
   ],
-  "strengths": [
-    "Something genuinely positive from their feedback or run data — max 3, min 0"
-  ],
-  "issues": [
-    "Real issue from their feedback using proper barrel racing terminology — max 3, min 0. If nothing bad reported, return empty array."
+  "improvements": [
+    "Directly addresses time loss 1 — specific and actionable for their next run.",
+    "Directly addresses time loss 2 — executable at training.",
+    "Directly addresses time loss 3 — reference a named drill if applicable."
   ],
   "drills": [
-    "Named drill from knowledge base tied to a specific reported problem — max 2, min 0"
+    "Named drill from knowledge base tied to a specific identified problem. Max 2.",
+    "Second drill if a second specific fault was identified."
   ]
 }
   `.trim();
@@ -1214,15 +1266,13 @@ Return ONLY this JSON:
 function sanitizeAnalysis(parsed) {
   return {
     summary: parsed.summary || "",
+    timeLost: Array.isArray(parsed.timeLost) ? parsed.timeLost : [],
+    improvements: Array.isArray(parsed.improvements) ? parsed.improvements : [],
+    drills: Array.isArray(parsed.drills) ? parsed.drills : [],
+    // Legacy fields for backward compat with old saved analyses
     observations: Array.isArray(parsed.observations) ? parsed.observations : [],
     strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
     issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-    drills: Array.isArray(parsed.drills) ? parsed.drills : [],
-    // Legacy fields kept for backward compat with old saved analyses
-    visualObservations: parsed.visualObservations || null,
-    speedInsight: parsed.speedInsight || null,
-    splitAnalysis: parsed.splitAnalysis || null,
-    patternNotes: parsed.patternNotes || null,
   };
 }
 
