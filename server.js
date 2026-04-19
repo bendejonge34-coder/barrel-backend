@@ -1089,48 +1089,53 @@ ${visionObservations}
 === CV METRICS ===
 ${coachingData}
 
-=== RUN DATA ===
+=== RUN DATA — USE ALL OF THIS IN YOUR ANALYSIS ===
 - Horse: ${horseName} | Rider: ${riderName}
-- Official time: ${run?.time || "not provided"}s
-- Arena: ${run?.arenaCondition || "not provided"}
+- Official time: ${run?.time ? run.time + "s" : "No time recorded"}
+- Show: ${run?.showName || "not provided"}
+- Date: ${run?.runDate || "not provided"}
+- Location: ${run?.location || "not provided"}
+- Arena condition: ${run?.arenaCondition || "not provided"}
+- Placing: ${run?.placing || "not provided"}
+- Earnings: ${run?.earnings ? "$" + run.earnings : "not provided"}
+- Knocked down barrels: ${run?.knockedBarrels && run.knockedBarrels.length > 0 ? run.knockedBarrels.map(b => `Barrel ${b}`).join(", ") : "none reported"}
 - Rider felt: "${run?.riderFeedback || "no feedback provided"}"
+- Notes: "${run?.notes || "none"}"
 ${slowestLabel ? `- SLOWEST split: ${slowestLabel}` : ""}
 
 === YOUR TASK ===
 You are an elite barrel racing coach. Produce a SHORT, ACCURATE, FACTUAL coaching report.
 
 STRICT RULES:
-- Base EVERYTHING on what the vision AI actually saw and the CV metrics. Do not invent observations.
-- NEVER mention degrees, pixel measurements, or technical CV numbers in the report
-- NEVER use per-barrel sections — no "1st Barrel:", "2nd Barrel:" headers
+- Reference the rider's actual time, arena condition, notes, and feedback directly in your analysis
+- If barrels were knocked down, address that specifically — which barrel, what likely caused it
+- If arena condition is noted (deep, hard, muddy etc) factor that into your coaching
+- If rider left notes or feedback, address those feelings directly using proper terminology
+- Base visual observations ONLY on what the vision AI clearly saw — do not guess
+- NEVER mention degrees, pixel measurements, or technical CV numbers
+- NEVER use per-barrel section headers
+- Exactly 3 observations — no more, no less. Make them count.
 - If nothing bad was observed, say so honestly — do not manufacture issues
-- If you cannot see something clearly from the frames, do not guess
-- Maximum 2 drills — only prescribe a drill if you saw the specific fault it fixes
-- Keep every field concise — riders read this at the barn, not a classroom
+- Maximum 2 drills — only if a specific fault was seen or reported
+- Keep it short — riders read this at the barn
 - Return ONLY valid JSON. No markdown. No extra text.
 
 Return ONLY this JSON:
 {
-  "summary": "2-3 sentences max. The single most important takeaway from this run. What the coach noticed first. Sound like a real person at the gate, not a report generator.",
+  "summary": "2-3 sentences. Reference the actual time, show/location if provided, and the single most important finding. Sound like a real coach at the gate.",
   "observations": [
-    "Factual observation 1 — something the vision AI clearly saw. One sentence. Specific barrel if relevant.",
-    "Factual observation 2 — another specific thing seen. Only include if genuinely observed.",
-    "Factual observation 3",
-    "Factual observation 4",
-    "Factual observation 5 — if you only have 3 real observations, only include 3. Do not pad."
+    "Observation 1 — factual, specific, references run data or what was clearly seen. One sentence.",
+    "Observation 2 — another specific finding. Reference arena condition, rider feedback, or visual evidence.",
+    "Observation 3 — third specific point. If barrels were knocked, address here."
   ],
   "strengths": [
-    "Something that genuinely looked good — specific and visual. If nothing stood out say so.",
-    "Second strength if genuinely observed",
-    "Third strength if genuinely observed — max 3, min 0"
+    "Genuine strength — specific and supported by evidence. Max 3, min 0."
   ],
   "issues": [
-    "A real issue clearly seen — name it with proper barrel racing terminology, explain what it costs. If nothing bad was seen, return an empty array.",
-    "Second issue if genuinely observed — max 3, min 0"
+    "Real issue with proper barrel racing terminology. If nothing bad seen or reported, return empty array. Max 3."
   ],
   "drills": [
-    "Named drill from the knowledge base tied directly to an observed issue. Include brief execution instruction. Only if a specific fault was seen.",
-    "Second drill if a second specific fault was observed — max 2, min 0"
+    "Named drill tied to a specific observed or reported fault. Brief execution note. Max 2, min 0."
   ]
 }`.trim();
 }
