@@ -1098,7 +1098,13 @@ ${coachingData}
 - Arena condition: ${run?.arenaCondition || "not provided"}
 - Placing: ${run?.placing || "not provided"}
 - Earnings: ${run?.earnings ? "$" + run.earnings : "not provided"}
-- Knocked down barrels: ${run?.knockedBarrels && run.knockedBarrels.length > 0 ? run.knockedBarrels.map(b => `Barrel ${b}`).join(", ") : "none reported"}
+- Knocked down barrels: ${run?.knockedBarrels && run.knockedBarrels.length > 0
+  ? run.knockedBarrels.map(b => `Barrel ${b}`).join(", ") + (
+      run.knockedPenalty === "nt" ? " — N-T (no time recorded due to knockdown)"
+      : run.knockedPenalty === "+5" ? ` — +${run.knockedBarrels.length * 5}s penalty added`
+      : " — knocked"
+    )
+  : "none reported"}
 - Rider felt: "${run?.riderFeedback || "no feedback provided"}"
 - Notes: "${run?.notes || "none"}"
 ${slowestLabel ? `- SLOWEST split: ${slowestLabel}` : ""}
