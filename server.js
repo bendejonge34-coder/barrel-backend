@@ -1078,56 +1078,45 @@ Frames near these timestamps show the horse at each barrel.` : "";
 SLOWEST SECTION: "${slowestSection}" — this is where the most time was lost. Give this barrel extra scrutiny.`
     : "";
 
-  return `You are a frame-by-frame video analyst watching a barrel racing run by ${riderName} on ${horseName}.
-You have 30 frames covering the run.
+  return `You are watching a barrel racing run by ${riderName} on ${horseName}.
 ${timestampContext}
 ${slowestFocus}
 
-YOUR ONLY JOB: Describe EXACTLY what you see using the evaluation framework below. Be a camera. No advice, no drills, no coaching.
+WHAT TO LOOK FOR — only report what you can clearly see in the frames.
+If something is not visible or unclear, say "not visible in frames."
 
-EVALUATION FRAMEWORK — classify what you see at each barrel using these exact terms:
+FOCUS ON THESE 5 THINGS — use the exact terms below:
 
-1. POCKET MANAGEMENT (horse's path around the barrel):
-   - "The Channel" = consistent gap between horse and barrel through the turn ✓
-   - "The Wrap" = tight, clean backside exit ✓
-   - "The Slice" = horse dives in with no gap, cutting the turn short ✗
-   - "The Drive-By" = horse runs past the barrel without turning in ✗
-   If you cannot clearly see barrel proximity, say so.
+RIDER POSITION:
+- "Neutral Spine" = upright, balanced in the saddle ✓
+- "Quiet Hands" = hands low and steady ✓
+- "The Tilter" = rider's upper body leaning toward the barrel ✗
+- "The Reacher" = hands reaching forward pulling on the front end ✗
 
-2. BIOMECHANICAL BEND (horse's body shape through the turn):
-   - "Banana Shape" = spine follows the arc of the turn ✓
-   - "Cradled" = horse stays between the rider's legs ✓
-   - "Log Stiff" = horse's body is straight with no rib bend ✗
-   - "Shoulder-Pop" = horse's body angles away from the turn ✗
+HORSE BODY:
+- "Banana Shape" = horse's body curves around the barrel ✓
+- "Log Stiff" = horse's body is straight, no arc ✗
+- "Shoulder-Pop" = horse's shoulder pushes outward ✗
 
-3. RIDER CENTER OF MASS (rider's body position):
-   - "Neutral Spine" = ear-hip-heel vertical alignment maintained ✓
-   - "Quiet Hands" = hands low and centered ✓
-   - "The Tilter" = rider leaning toward the barrel ✗
-   - "The Reacher" = hands extending forward, pulling on front end ✗
+HORSE RATE (weight shift approaching barrel):
+- "Sit & Squat" = hindquarters lower, horse collecting before the turn ✓
+- "Downhill Run" = horse running heavy on the front end through the turn ✗
 
-4. KINETIC RATE (how well the horse shifts weight to hindquarters):
-   - "Sit & Squat" = hindquarters lower, tail drops below withers ✓
-   - "Hind Engagement" = back hooves visibly under the belly ✓
-   - "Downhill Run" = weight on front shoulders, head high ✗
-   - "Stiff-Legged" = locked joints, choppy stride ✗
+HORSE EXIT:
+- "Square Exit" = horse drives cleanly out of the turn ✓
+- "The Fishtail" = hind end swings out on exit ✗
+- "Wandering" = horse drifts instead of driving to the next barrel ✗
 
-5. TRAJECTORY VECTOR (horse's exit and direction after the turn):
-   - "Laser Focus" = nose pointed directly at next barrel on exit ✓
-   - "Square Exit" = hips clear the barrel cleanly before turning out ✓
-   - "The Fishtail" = hind end swings away from barrel on exit ✗
-   - "Wandering" = horse drifts or looks toward fence/gate ✗
+BARREL CONTACT:
+- Did any barrel appear to be knocked or disturbed? (yes/no/not visible)
 
-REPORTING FORMAT — for each barrel write:
-- Which markers you observed (use exact terms above)
-- One specific sentence of what you actually saw in the frames
-- Flag which barrel had the clearest fault — this will be used to identify the PRIMARY fault
+REPORT FORMAT:
+For each barrel write 2-3 sentences:
+1. Which terms apply (positive and negative)
+2. What you specifically saw in the frames
+3. Your confidence level: HIGH (clearly visible) / MEDIUM (partially visible) / LOW (unclear)
 
-RULES:
-- NEVER mention degrees, angles, or measurements
-- NEVER say a turn was wide or narrow — only describe what you classify per the framework
-- Only report what you can actually see. If frames are unclear at a barrel, say so.
-- Keep each barrel to 3-4 sentences maximum.`;
+Mark which barrel showed the CLEAREST FAULT — the coaching pass will focus there.`;
 }
 
 // ─── PASS 2: Coaching Pass Prompt ────────────────────────────────────────────
@@ -1183,77 +1172,79 @@ function buildCoachingPassPrompt(run, pythonResult, visionObservations) {
 
   return `${BARREL_RACING_KNOWLEDGE_BASE}
 
-=== WHAT THE VISION AI SAW ===
+=== VISION OBSERVATIONS ===
 ${visionObservations}
-
-=== CV METRICS (reference only — do not quote numbers directly) ===
-${coachingData}
 
 === RUN DATA ===
 Horse: ${horseName} | Rider: ${riderName}
-Official time: ${run?.knockedPenalty === "nt" ? "N-T (no time — barrel knocked)" : officialTime > 0 ? officialTime.toFixed(2) + "s" + (penaltySeconds > 0 ? ` (includes +${penaltySeconds}s penalty)` : "") : "not recorded"}
-Show: ${run?.showName || "—"} | Date: ${run?.runDate || "—"} | Location: ${run?.location || "—"}
-Arena condition: ${run?.arenaCondition || "not provided"}
-Placing: ${run?.placing || "—"} | Earnings: ${run?.earnings ? "$" + run.earnings : "—"}
-Knocked barrels: ${run?.knockedBarrels?.length > 0 ? `Barrel ${run.knockedBarrels.join(", ")} — ${run.knockedPenalty === "nt" ? "N-T" : `+${run.knockedBarrels.length * 5}s penalty`}` : "none"}
-Rider felt: "${run?.riderFeedback || "no feedback entered"}"
+Official time: ${run?.knockedPenalty === "nt" ? "N-T (barrel knocked — no time)" : officialTime > 0 ? officialTime.toFixed(2) + "s" + (penaltySeconds > 0 ? ` (includes +${penaltySeconds}s penalty)` : "") : "not recorded"}
+Show: ${run?.showName || "—"} | Location: ${run?.location || "—"} | Date: ${run?.runDate || "—"}
+Arena: ${run?.arenaCondition || "not provided"} | Placing: ${run?.placing || "—"}
+Knocked barrels: ${run?.knockedBarrels?.length > 0 ? `Barrel ${run.knockedBarrels.join(", ")} — ${run.knockedPenalty === "nt" ? "N-T" : `+${run.knockedBarrels.length * 5}s`}` : "none"}
+Rider felt: "${run?.riderFeedback || "no feedback"}"
 Notes: "${run?.notes || "none"}"
 ${hasSplits ? `
-SPLIT TIMES (${splitsLabel} — treat as ground truth):
+SPLIT TIMES (${splitsLabel}):
 ${validSplits.map(([label, val]) => `  ${label}: ${Number(val).toFixed(2)}s`).join("
 ")}
-SLOWEST section: ${slowestSplit[0]} at ${Number(slowestSplit[1]).toFixed(2)}s — THIS is where the most time was lost
-FASTEST section: ${fastestSplit[0]} at ${Number(fastestSplit[1]).toFixed(2)}s
-These splits are proportionally correct relative to the official time — do not question or recalculate them.` : "No split data available."}
+► SLOWEST: ${slowestSplit[0]} at ${Number(slowestSplit[1]).toFixed(2)}s — PRIMARY FOCUS
+► FASTEST: ${fastestSplit[0]} at ${Number(fastestSplit[1]).toFixed(2)}s` : "No splits available — use rider feedback and run data only."}
 
-=== YOUR JOB ===
-You are an elite barrel racing coach. The vision AI has analyzed this run using a 5-point evaluation framework and flagged specific faults using exact terminology. Your job is to build a precise, non-generic coaching report.
+=== YOUR TASK ===
+You are a barrel racing coach. Your job is simple:
+1. Identify what went wrong at the SLOWEST split
+2. Explain why using the fault framework
+3. Give one specific, executable fix
 
-STEP 1 — IDENTIFY THE PRIMARY FAULT:
-From the vision observations, identify the single most impactful fault at the slowest split. Use the exact framework terms:
-- Pocket: "The Slice" or "The Drive-By"
-- Bend: "Log Stiff" or "Shoulder-Pop"
-- Rider: "The Tilter" or "The Reacher"
-- Rate: "Downhill Run" or "Stiff-Legged"
-- Trajectory: "The Fishtail" or "Wandering"
+FAULT FRAMEWORK — use these terms when they apply:
+- Rider: "The Tilter" (leaning in) | "The Reacher" (hands forward/pulling)
+- Horse body: "Log Stiff" (no arc) | "Shoulder-Pop" (shoulder pushes out)
+- Rate: "Downhill Run" (on forehand) | "Stiff-Legged" (choppy, no collection)
+- Exit: "The Fishtail" (hind swings out) | "Wandering" (drifts off line)
 
-STEP 2 — CORRELATE FAULT TO CAUSE:
-Use conflict logic to understand WHY the fault occurred:
-- "The Tilter" + "The Slice" = rider leaning caused horse to dive — shoulder interference fault
-- "The Reacher" + "Downhill Run" = rider didn't rate, horse stayed on forehand — kinetic overrun fault
-- "Log Stiff" + "The Fishtail" = no rib bend caused hind end to swing — biomechanical fault
-- "Shoulder-Pop" + "Wandering" = horse lost focus and drifted — trajectory fault
-Use these correlations to write a causal explanation, not just a description.
+CORRELATION RULE — combine faults when they appear together:
+- "The Tilter" causing "Downhill Run" = rider disrupted the rate cue
+- "Log Stiff" causing "The Fishtail" = no rib bend led to hind end loss
+- "The Reacher" causing "Shoulder-Pop" = pulling front end knocked horse off track
+Only use a correlation if BOTH faults were actually observed.
 
-STEP 3 — BUILD THE REPORT around the split data and primary fault. Every point must be grounded in actual data from this run — specific barrel, specific split time, specific observation.
+WHAT GOOD OUTPUT LOOKS LIKE:
+- Summary names the primary fault and the slowest split time
+- timeLost[0] is about the SLOWEST split — specific fault, specific cause
+- timeLost[1] is about a DIFFERENT section with a genuinely different fault
+- timeLost[2] only exists if a third real problem was observed
+- Each improvement matches its timeLost item exactly
+- Drills are named and executable, not vague
 
-STRICT RULES:
-- NEVER say a turn was "wide" or describe width — this is a hard rule, no exceptions
-- NEVER mention degrees, angles, pixel measurements, or CV technical numbers
-- NEVER repeat the same fault across all 3 time loss points — if one barrel had a primary fault, the other points must be about different moments or sections
-- NEVER produce generic advice like "work on your rate" without saying exactly which barrel, what was seen, and which drill fixes it
-- NEVER contradict the split data — if a section was fast, do not say time was lost there
-- Use the framework terminology naturally in the report (e.g. "The Tilter was evident at the second barrel...")
-- If the rider gave feedback, reference their exact words and validate or correct with coaching terminology
-- If a barrel was knocked, identify the primary cause using fault correlation
+WHAT BAD OUTPUT LOOKS LIKE (never do this):
+- Repeating the same issue three different ways
+- Saying time was lost somewhere the splits show was fast
+- Generic advice with no specific barrel or drill named
+- Inventing faults not supported by vision observations or split data
+
+STRICT OUTPUT RULES:
+- Do NOT say a turn or approach was wide or narrow — ever
+- Do NOT mention degrees, angles, or pixel measurements
+- Do NOT contradict the split data
+- If only 1 or 2 genuine time losses exist, return 1 or 2 — do not pad
 - Return ONLY valid JSON. No markdown. No extra text.
 
 Return ONLY this JSON:
 {
-  "summary": "2-3 sentences. Name the primary fault using framework terminology. Reference the specific barrel and the split time where it was most pronounced. Sound like a real coach at the gate — specific, direct, grounded in this run.",
+  "summary": "2-3 sentences. Reference the official time, the show or location if given, the slowest split, and the primary fault by name. Sound like a coach at the gate — direct and specific.",
   "timeLost": [
-    "Time loss 1 — name the primary fault (use framework term), which barrel, why it cost time using causal explanation. E.g. 'The Tilter at the second barrel caused shoulder interference — when the rider leaned in, the horse lost its Banana Shape and stalled the exit.'",
-    "Time loss 2 — a different section or fault. Must reference specific split or visual evidence. Not a repeat of point 1.",
-    "Time loss 3 — third specific loss. If only 2 genuine losses are identifiable, return 2 honest points, not 3 padded ones."
+    "PRIMARY: [fault term] at [barrel] ([split time]s) — explain the cause in one sentence using barrel racing language.",
+    "SECONDARY: A genuinely different fault at a different section. Supported by vision or split data.",
+    "THIRD: Only if a third distinct, real problem exists — otherwise omit this entry entirely."
   ],
   "improvements": [
-    "Improvement 1 — directly fixes time loss 1. Name the specific drill, describe exactly how to execute it for this fault. E.g. 'Square the Barrel drill at the second barrel — ride a square box around it at a trot until you can hold Neutral Spine through the corner without tilting.'",
-    "Improvement 2 — directly fixes time loss 2. Specific and executable this week.",
-    "Improvement 3 — directly fixes time loss 3. Ties to a named drill if applicable."
+    "Directly fixes timeLost[0]: name the drill, which barrel, how to execute it.",
+    "Directly fixes timeLost[1]: specific and executable this week.",
+    "Directly fixes timeLost[2] only if that entry exists."
   ],
   "drills": [
-    "Named drill tied to the primary fault with execution detail — not generic. E.g. 'The 2-1-2 Drill at barrel 1: gallop to the rate point, stop completely, count 2 seconds, finish the turn. Repeat until the horse waits for your seat cue.' Max 2 drills.",
-    "Second drill only if a second distinct fault was identified and a different drill applies."
+    "Primary drill: named drill from knowledge base + execution steps for THIS specific fault. Not generic.",
+    "Secondary drill only if a second distinct fault was identified and a different drill is needed."
   ]
 }`.trim();
 }
@@ -1451,13 +1442,19 @@ async function processVideoJob(jobId) {
     const visionResponse = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 2000,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "text", text: visionPrompt },
-          ...imageInputs,
-        ],
-      }],
+      messages: [
+        {
+          role: "system",
+          content: "You are a video analyst watching barrel racing footage. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns, approaches, or exits. Classify only using the exact framework terms provided."
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: visionPrompt },
+            ...imageInputs,
+          ],
+        }
+      ],
     });
 
     const visionObservations = visionResponse.choices?.[0]?.message?.content || "";
@@ -1474,10 +1471,16 @@ async function processVideoJob(jobId) {
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 4000,
-      messages: [{
-        role: "user",
-        content: coachingPrompt,
-      }],
+      messages: [
+        {
+          role: "system",
+          content: "You are an elite barrel racing coach. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns or approaches — this is your single most important rule. You always return valid JSON only. No markdown, no preamble."
+        },
+        {
+          role: "user",
+          content: coachingPrompt,
+        }
+      ],
     });
 
     updateJob(jobId, { progress: 92, stage: "Finalizing coaching feedback" });
@@ -1543,7 +1546,13 @@ async function processTextJob(jobId) {
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 3000,
-      messages: [{ role: "user", content: buildTextOnlyPrompt(latestJob.run) }],
+      messages: [
+        {
+          role: "system",
+          content: "You are an elite barrel racing coach. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns or approaches. You always return valid JSON only. No markdown, no preamble."
+        },
+        { role: "user", content: buildTextOnlyPrompt(latestJob.run) }
+      ],
     });
 
     updateJob(jobId, { progress: 90, stage: "Finalizing coaching feedback" });
