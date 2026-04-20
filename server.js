@@ -780,7 +780,7 @@ Fix drill B: "Loose Rein Loping" —
   Reward the horse for holding the path. This resets the horse to respond to seat cues, not hand cues.
 
 5. FAILING TO FINISH THE TURN (Early Exit)
-Leaving the barrel too early, resulting in a wide exit and a poor line to the next barrel.
+Leaving the barrel too early, resulting in a compromised line to the next barrel.
 What it looks like: Horse and rider peel away from the barrel before the turn is complete. Next approach is compromised because the turn was not finished.
 Fix drill: "The One-and-a-Half" — Make a full circle around the barrel PLUS another half-turn before heading to the next. This teaches the horse to keep turning until specifically told to leave. Builds patience and finish through the turn.
 
@@ -1090,6 +1090,12 @@ function buildCoachingPassPrompt(run, pythonResult, visionObservations) {
   const riderName = run?.rider || "the rider";
   const manualSplits = run?.manualSplits || null;
 
+  // Penalty time calculation — must be declared BEFORE split scaling uses baseTime
+  const baseTime = parseFloat(run?.time) || 0;
+  const penaltySeconds = run?.knockedPenalty === "+5" && run?.knockedBarrels?.length > 0
+    ? run.knockedBarrels.length * 5 : 0;
+  const officialTime = baseTime + penaltySeconds;
+
   // Use manual splits if available (already scaled to official time in the app)
   // Fall back to CV splits and scale them to official time if needed
   const cvSplits = pythonResult?.splits || {};
@@ -1124,12 +1130,6 @@ function buildCoachingPassPrompt(run, pythonResult, visionObservations) {
   const fastestSplit = validSplits[validSplits.length - 1] || null;
   const hasSplits = validSplits.length > 0;
   const splitsLabel = manualSplits ? "user-marked, scaled to official time" : "CV-estimated, scaled to official time";
-
-  // Penalty time calculation
-  const baseTime = parseFloat(run?.time) || 0;
-  const penaltySeconds = run?.knockedPenalty === "+5" && run?.knockedBarrels?.length > 0
-    ? run.knockedBarrels.length * 5 : 0;
-  const officialTime = baseTime + penaltySeconds;
 
   return `${BARREL_RACING_KNOWLEDGE_BASE}
 
