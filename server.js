@@ -1183,18 +1183,19 @@ function buildCoachingPassPrompt(run, pythonResult, visionObservations) {
     }
   }
 
-  const splitMap = {
-    "Alley to 1st Barrel": sp1,
-    "1st to 2nd Barrel":   sp2,
-    "2nd to 3rd Barrel":   sp3,
-    "3rd Barrel to Home":  sp4,
+  // Normalize to ft/s using Pattern A distances — slowest ft/s is genuinely slowest
+  const splitRawMap = {
+    "Start to 1st Barrel":   sp1,
+    "1st to 2nd Barrel":     sp2,
+    "2nd to 3rd Barrel":     sp3,
+    "3rd Barrel to Finish":  sp4,
   };
-  const validSplits = Object.entries(splitMap)
-    .filter(([, v]) => v != null && Number.isFinite(Number(v)))
-    .sort((a, b) => Number(b[1]) - Number(a[1]));
-  const slowestSplit = validSplits[0] || null;
-  const fastestSplit = validSplits[validSplits.length - 1] || null;
-  const hasSplits = validSplits.length > 0;
+  const normalizedSections = normalizeSplitsToSpeed(
+    Object.fromEntries(Object.entries(splitRawMap).filter(([,v]) => v != null && Number.isFinite(Number(v))))
+  );
+  const slowestSplit = normalizedSections[0] || null;
+  const fastestSplit = normalizedSections[normalizedSections.length - 1] || null;
+  const hasSplits = normalizedSections.length > 0;
   const splitsLabel = manualSplits ? "user-marked, scaled to official time" : "CV-estimated, scaled to official time";
 
   return `${BARREL_RACING_KNOWLEDGE_BASE}
