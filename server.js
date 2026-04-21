@@ -1185,8 +1185,7 @@ Rider felt: "${run?.riderFeedback || "no feedback"}"
 Notes: "${run?.notes || "none"}"
 ${hasSplits ? `
 SPLIT TIMES (${splitsLabel}):
-${validSplits.map(([label, val]) => `  ${label}: ${Number(val).toFixed(2)}s`).join("
-")}
+${validSplits.map(([label, val]) => `  ${label}: ${Number(val).toFixed(2)}s`).join("\n")}
 ► SLOWEST: ${slowestSplit[0]} at ${Number(slowestSplit[1]).toFixed(2)}s — PRIMARY FOCUS
 ► FASTEST: ${fastestSplit[0]} at ${Number(fastestSplit[1]).toFixed(2)}s` : "No splits available — use rider feedback and run data only."}
 
