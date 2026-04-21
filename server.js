@@ -682,31 +682,42 @@ Recent rider feedback and notes:
 // Expert coaching knowledge injected into every prompt so the AI coaches
 // like a professional with deep barrel racing expertise.
 
-// ─── Pattern A Arena Distances (WPRA Standard) ───────────────────────────────
-// These are fixed distances for Pattern A — the most common barrel racing setup.
-// Used to normalize split times to feet-per-second so the AI identifies the
-// genuinely slowest section by speed, not raw time.
-// A short split like Start→B1 (60ft) will always have a low time but may
-// actually represent the slowest speed if the horse is still accelerating.
+// ─── Arena Distance Normalization ────────────────────────────────────────────
+// Default: WPRA Pattern A distances. User can override with their arena's
+// actual measurements for accurate ft/sec calculations.
 
 const PATTERN_A_DISTANCES = {
-  "Start to 1st Barrel":   60,   // ft
-  "1st to 2nd Barrel":     90,   // ft
-  "2nd to 3rd Barrel":    105,   // ft
-  "3rd Barrel to Finish": 120,   // ft
+  "Start to 1st Barrel":   60,
+  "1st to 2nd Barrel":     90,
+  "2nd to 3rd Barrel":    105,
+  "3rd Barrel to Finish": 120,
 };
 
-function normalizeSplitsToSpeed(splits) {
-  // splits = { label: seconds } object
-  // returns array sorted slowest→fastest by ft/s (lowest ft/s = slowest)
+function getArenaDistances(run) {
+  // Use user-entered distances if provided, otherwise Pattern A defaults
+  const d = run?.arenaDistances;
+  if (d && d.startToB1 && d.b1ToB2 && d.b2ToB3 && d.b3ToFinish) {
+    return {
+      "Start to 1st Barrel":   Number(d.startToB1),
+      "1st to 2nd Barrel":     Number(d.b1ToB2),
+      "2nd to 3rd Barrel":     Number(d.b2ToB3),
+      "3rd Barrel to Finish":  Number(d.b3ToFinish),
+    };
+  }
+  return PATTERN_A_DISTANCES;
+}
+
+function normalizeSplitsToSpeed(splits, distances) {
+  // splits = { label: seconds }, distances = { label: feet }
+  // returns array sorted slowest→fastest by ft/s
+  const dist = distances || PATTERN_A_DISTANCES;
   const results = [];
   for (const [label, seconds] of Object.entries(splits)) {
-    const distance = PATTERN_A_DISTANCES[label];
+    const distance = dist[label];
     if (distance == null || !Number.isFinite(Number(seconds)) || Number(seconds) <= 0) continue;
-    const speed = distance / Number(seconds); // ft/s
+    const speed = distance / Number(seconds);
     results.push({ label, seconds: Number(seconds), distance, speed: parseFloat(speed.toFixed(2)) });
   }
-  // Sort slowest ft/s first
   results.sort((a, b) => a.speed - b.speed);
   return results;
 }
@@ -939,8 +950,10 @@ function buildBarrelCoachingData(run, pythonResult) {
     "2nd to 3rd Barrel":     s3,
     "3rd Barrel to Finish":  s4,
   };
+  const cvArenaDist = getArenaDistances(run);
   const cvNormalized = normalizeSplitsToSpeed(
-    Object.fromEntries(Object.entries(cvNormalizedMap).filter(([,v]) => v != null && Number.isFinite(Number(v))))
+    Object.fromEntries(Object.entries(cvNormalizedMap).filter(([,v]) => v != null && Number.isFinite(Number(v)))),
+    cvArenaDist
   );
   const slowestBySpeed = cvNormalized[0] || null;
   const fastestBySpeed = cvNormalized[cvNormalized.length - 1] || null;
@@ -1086,8 +1099,10 @@ function buildVisionPassPrompt(run, pythonResult) {
     "2nd to 3rd Barrel":     manualSplits?.barrel2_to_barrel3_seconds,
     "3rd Barrel to Finish":  manualSplits?.barrel3_to_home_seconds,
   };
+  const arenaDist = getArenaDistances(run);
   const normalizedSplits = normalizeSplitsToSpeed(
-    Object.fromEntries(Object.entries(rawSplitMap).filter(([,v]) => v != null))
+    Object.fromEntries(Object.entries(rawSplitMap).filter(([,v]) => v != null)),
+    arenaDist
   );
   const slowestSection = normalizedSplits.length > 0 ? normalizedSplits[0].label : null;
   const slowestTime = normalizedSplits.length > 0 ? normalizedSplits[0].seconds.toFixed(2) : null;
@@ -1190,8 +1205,10 @@ function buildCoachingPassPrompt(run, pythonResult, visionObservations) {
     "2nd to 3rd Barrel":     sp3,
     "3rd Barrel to Finish":  sp4,
   };
+  const arenaDist = getArenaDistances(run);
   const normalizedSections = normalizeSplitsToSpeed(
-    Object.fromEntries(Object.entries(splitRawMap).filter(([,v]) => v != null && Number.isFinite(Number(v))))
+    Object.fromEntries(Object.entries(splitRawMap).filter(([,v]) => v != null && Number.isFinite(Number(v)))),
+    arenaDist
   );
   const slowestSplit = normalizedSections[0] || null;
   const fastestSplit = normalizedSections[normalizedSections.length - 1] || null;
@@ -1213,7 +1230,7 @@ Rider felt: "${run?.riderFeedback || "no feedback"}"
 Notes: "${run?.notes || "none"}"
 ${hasSplits ? `
 SPLIT TIMES WITH SPEED NORMALIZATION (${splitsLabel}):
-Pattern A distances — Start→B1: 60ft | B1→B2: 90ft | B2→B3: 105ft | B3→Finish: 120ft
+Arena distances used — Start→B1: ${arenaDist["Start to 1st Barrel"]}ft | B1→B2: ${arenaDist["1st to 2nd Barrel"]}ft | B2→B3: ${arenaDist["2nd to 3rd Barrel"]}ft | B3→Finish: ${arenaDist["3rd Barrel to Finish"]}ft${run?.arenaDistances ? " (user-entered)" : " (WPRA Pattern A defaults)"}
 
 ${normalizedSections.map(s =>
   `  ${s.label}: ${s.seconds.toFixed(2)}s over ${s.distance}ft = ${s.speed.toFixed(1)} ft/s`
