@@ -682,6 +682,35 @@ Recent rider feedback and notes:
 // Expert coaching knowledge injected into every prompt so the AI coaches
 // like a professional with deep barrel racing expertise.
 
+// ─── Pattern A Arena Distances (WPRA Standard) ───────────────────────────────
+// These are fixed distances for Pattern A — the most common barrel racing setup.
+// Used to normalize split times to feet-per-second so the AI identifies the
+// genuinely slowest section by speed, not raw time.
+// A short split like Start→B1 (60ft) will always have a low time but may
+// actually represent the slowest speed if the horse is still accelerating.
+
+const PATTERN_A_DISTANCES = {
+  "Start to 1st Barrel":   60,   // ft
+  "1st to 2nd Barrel":     90,   // ft
+  "2nd to 3rd Barrel":    105,   // ft
+  "3rd Barrel to Finish": 120,   // ft
+};
+
+function normalizeSplitsToSpeed(splits) {
+  // splits = { label: seconds } object
+  // returns array sorted slowest→fastest by ft/s (lowest ft/s = slowest)
+  const results = [];
+  for (const [label, seconds] of Object.entries(splits)) {
+    const distance = PATTERN_A_DISTANCES[label];
+    if (distance == null || !Number.isFinite(Number(seconds)) || Number(seconds) <= 0) continue;
+    const speed = distance / Number(seconds); // ft/s
+    results.push({ label, seconds: Number(seconds), distance, speed: parseFloat(speed.toFixed(2)) });
+  }
+  // Sort slowest ft/s first
+  results.sort((a, b) => a.speed - b.speed);
+  return results;
+}
+
 const BARREL_RACING_KNOWLEDGE_BASE = `
 === BARREL RACING EXPERT COACHING KNOWLEDGE ===
 You are an elite barrel racing coach. Apply this knowledge to every analysis.
@@ -903,29 +932,23 @@ function buildBarrelCoachingData(run, pythonResult) {
     }
   }
 
-  const splitMapFinal = {
-    "Alley to 1st Barrel": s1,
-    "1st to 2nd Barrel":   s2,
-    "2nd to 3rd Barrel":   s3,
-    "3rd Barrel to Home":  s4,
+  // Normalize to ft/s using Pattern A distances
+  const cvNormalizedMap = {
+    "Start to 1st Barrel":   s1,
+    "1st to 2nd Barrel":     s2,
+    "2nd to 3rd Barrel":     s3,
+    "3rd Barrel to Finish":  s4,
   };
-  const validSplitsFinal = Object.entries(splitMapFinal).filter(([, v]) => v != null && Number.isFinite(Number(v)));
-  let slowestSplit = null, fastestSplit = null;
-  if (validSplitsFinal.length > 0) {
-    slowestSplit = validSplitsFinal.reduce((a, b) => Number(b[1]) > Number(a[1]) ? b : a);
-    fastestSplit = validSplitsFinal.reduce((a, b) => Number(b[1]) < Number(a[1]) ? b : a);
-  }
-  const splitAnalysisLine = slowestSplit && fastestSplit
-    ? `  - SLOWEST split: ${slowestSplit[0]} at ${slowestSplit[1]}s — THIS IS WHERE THE MOST TIME IS BEING LOST.
-  - FASTEST split: ${fastestSplit[0]} at ${fastestSplit[1]}s`
-    : "";
+  const cvNormalized = normalizeSplitsToSpeed(
+    Object.fromEntries(Object.entries(cvNormalizedMap).filter(([,v]) => v != null && Number.isFinite(Number(v))))
+  );
+  const slowestBySpeed = cvNormalized[0] || null;
+  const fastestBySpeed = cvNormalized[cvNormalized.length - 1] || null;
 
-  const splitReport = `Split times (${splitsSource}):
-  - Alley to 1st barrel: ${s1 ?? "n/a"}s
-  - 1st to 2nd barrel: ${s2 ?? "n/a"}s
-  - 2nd to 3rd barrel: ${s3 ?? "n/a"}s
-  - 3rd barrel to home: ${s4 ?? "n/a"}s
-${splitAnalysisLine}`;
+  const splitReport = `Split times by speed — ${splitsSource} (Pattern A distances):
+${cvNormalized.map(s => `  - ${s.label}: ${s.seconds.toFixed(2)}s / ${s.distance}ft = ${s.speed.toFixed(1)} ft/s`).join("\n")}
+${slowestBySpeed ? `  ► SLOWEST by speed: ${slowestBySpeed.label} at ${slowestBySpeed.speed.toFixed(1)} ft/s` : ""}
+${fastestBySpeed ? `  ► FASTEST by speed: ${fastestBySpeed.label} at ${fastestBySpeed.speed.toFixed(1)} ft/s` : ""}`;
 
   return `
 === COMPUTER VISION COACHING DATA ===
@@ -1055,16 +1078,20 @@ function buildVisionPassPrompt(run, pythonResult) {
   const manualSplits = run?.manualSplits || null;
 
   // Pre-identify slowest split so vision pass knows where to focus
-  const splitMap = {
-    "1st barrel": manualSplits?.start_to_barrel1_seconds,
-    "2nd barrel": manualSplits?.barrel1_to_barrel2_seconds,
-    "3rd barrel": manualSplits?.barrel2_to_barrel3_seconds,
-    "home run":   manualSplits?.barrel3_to_home_seconds,
+  // Normalize splits to ft/s using Pattern A distances
+  // The slowest ft/s section is where time was genuinely lost — not the longest raw time
+  const rawSplitMap = {
+    "Start to 1st Barrel":   manualSplits?.start_to_barrel1_seconds,
+    "1st to 2nd Barrel":     manualSplits?.barrel1_to_barrel2_seconds,
+    "2nd to 3rd Barrel":     manualSplits?.barrel2_to_barrel3_seconds,
+    "3rd Barrel to Finish":  manualSplits?.barrel3_to_home_seconds,
   };
-  const validSplits = Object.entries(splitMap).filter(([, v]) => v != null && Number.isFinite(Number(v)));
-  const slowestSection = validSplits.length > 0
-    ? validSplits.reduce((a, b) => Number(b[1]) > Number(a[1]) ? b : a)[0]
-    : null;
+  const normalizedSplits = normalizeSplitsToSpeed(
+    Object.fromEntries(Object.entries(rawSplitMap).filter(([,v]) => v != null))
+  );
+  const slowestSection = normalizedSplits.length > 0 ? normalizedSplits[0].label : null;
+  const slowestTime = normalizedSplits.length > 0 ? normalizedSplits[0].seconds.toFixed(2) : null;
+  const slowestSpeed = normalizedSplits.length > 0 ? normalizedSplits[0].speed.toFixed(1) : null;
 
   const timestampContext = barrelTimestamps ? `
 Barrel timestamps (rider tapped when horse reached each barrel):
@@ -1075,7 +1102,7 @@ Frames near these timestamps show the horse at each barrel.` : "";
 
   const slowestFocus = slowestSection
     ? `
-SLOWEST SECTION: "${slowestSection}" — this is where the most time was lost. Give this barrel extra scrutiny.`
+SLOWEST SECTION BY SPEED: "${slowestSection}" — ${slowestTime}s covering ${PATTERN_A_DISTANCES[slowestSection]}ft = ${slowestSpeed} ft/s. This is where the horse was genuinely slowest. Give this section extra scrutiny.`
     : "";
 
   return `You are watching a barrel racing run by ${riderName} on ${horseName}.
@@ -1184,10 +1211,17 @@ Knocked barrels: ${run?.knockedBarrels?.length > 0 ? `Barrel ${run.knockedBarrel
 Rider felt: "${run?.riderFeedback || "no feedback"}"
 Notes: "${run?.notes || "none"}"
 ${hasSplits ? `
-SPLIT TIMES (${splitsLabel}):
-${validSplits.map(([label, val]) => `  ${label}: ${Number(val).toFixed(2)}s`).join("\n")}
-► SLOWEST: ${slowestSplit[0]} at ${Number(slowestSplit[1]).toFixed(2)}s — PRIMARY FOCUS
-► FASTEST: ${fastestSplit[0]} at ${Number(fastestSplit[1]).toFixed(2)}s` : "No splits available — use rider feedback and run data only."}
+SPLIT TIMES WITH SPEED NORMALIZATION (${splitsLabel}):
+Pattern A distances — Start→B1: 60ft | B1→B2: 90ft | B2→B3: 105ft | B3→Finish: 120ft
+
+${normalizedSections.map(s =>
+  `  ${s.label}: ${s.seconds.toFixed(2)}s over ${s.distance}ft = ${s.speed.toFixed(1)} ft/s`
+).join("\n")}
+
+► SLOWEST BY SPEED: "${slowestSplit.label}" at ${slowestSplit.speed.toFixed(1)} ft/s (${slowestSplit.seconds.toFixed(2)}s over ${slowestSplit.distance}ft) — THIS IS WHERE THE HORSE WAS GENUINELY SLOWEST
+► FASTEST BY SPEED: "${fastestSplit.label}" at ${fastestSplit.speed.toFixed(1)} ft/s
+
+NOTE: Slowest is determined by ft/s, not raw time. Start→B1 (60ft) will always have the lowest raw time but may be the slowest speed. Base all coaching on the ft/s ranking above.` : "No splits available — use rider feedback and run data only."}
 
 === YOUR TASK ===
 You are a barrel racing coach. Your job is simple:
@@ -1233,7 +1267,7 @@ Return ONLY this JSON:
   "summary": "2-3 sentences. Reference the official time, the show or location if given, the slowest split, and the primary fault by name. Sound like a coach at the gate — direct and specific.",
   "timeLost": [
     "PRIMARY: [fault term] at [barrel] ([split time]s) — explain the cause in one sentence using barrel racing language.",
-    "SECONDARY: A genuinely different fault at a different section. Supported by vision or split data.",
+    "SECONDARY: A genuinely different fault at a DIFFERENT barrel/section from point 1. Never repeat the same barrel. Supported by vision or split data.",
     "THIRD: Only if a third distinct, real problem exists — otherwise omit this entry entirely."
   ],
   "improvements": [
@@ -1241,10 +1275,6 @@ Return ONLY this JSON:
     "Directly fixes timeLost[1]: specific and executable this week.",
     "Directly fixes timeLost[2] only if that entry exists."
   ],
-  "drills": [
-    "Primary drill: named drill from knowledge base + execution steps for THIS specific fault. Not generic.",
-    "Secondary drill only if a second distinct fault was identified and a different drill is needed."
-  ]
 }`.trim();
 }
 
@@ -1305,10 +1335,6 @@ Return ONLY this JSON:
     "Directly fixes time loss 2 — specific and executable at their next training session.",
     "Directly fixes time loss 3 if applicable — tied to a named drill."
   ],
-  "drills": [
-    "Named drill with execution detail tied to the primary identified problem. Max 2.",
-    "Second drill only if a second distinct fault was identified."
-  ]
 }
   `.trim();
 }
