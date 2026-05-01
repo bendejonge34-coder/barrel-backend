@@ -1170,6 +1170,35 @@ restoreGuardianStore().catch((err) => console.error("[BOOT] Guardian restore fai
 app.get("/", (_req, res) => res.json({ ok: true, message: "Barrel Pro AI Server running", activeJobs: jobs.size }));
 app.get("/health", (_req, res) => res.json({ ok: true, message: "Barrel Pro AI Server running", activeJobs: jobs.size }));
 
+app.post("/compare-runs", async (req, res) => {
+  try {
+    const { runA, runB, splitsA, splitsB } = req.body;
+    if (!runA || !runB) return res.status(400).json({ error: "Two runs required." });
+
+    const buildDesc = (run, splits, label) => {
+      let desc = `${label}: ${run.horse || "Unknown"}, Time: ${run.time}s`;
+      if (run.showName) desc += `, Show: ${run.showName}`;
+      if (run.arenaCondition) desc += `, Arena: ${run.arenaCondition}`;
+      if (run.placing) desc += `, Placing: ${run.placing}`;
+      if (splits) desc += `. Splits — Start to B1: ${splits.s1}s, B1 to B2: ${splits.s2}s, B2 to B3: ${splits.s3}s, B3 to Finish: ${splits.s4}s`;
+      return desc;
+    };
+
+    const prompt = `You are analyzing two barrel racing runs. State only facts from the data provided. Do not guess at causes, do not give coaching advice, do not speculate. Only describe what the numbers show.\n\n${buildDesc(runA, splitsA, "Run A")}\n${buildDesc(runB, splitsB, "Run B")}\n\nWrite 3-5 short factual sentences comparing these two runs. Only state what the numbers directly show.`;
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 300,
+    });
+
+    const summary = response.choices?.[0]?.message?.content || "Could not generate summary.";
+    res.json({ summary });
+  } catch (err) {
+    console.error("[COMPARE] Error:", err.message);
+    res.status(500).json({ error: "Failed to generate comparison summary." });
+  }
+});
 app.get("/debug/jobs", (_req, res) => {
   res.json({
     ok: true,
