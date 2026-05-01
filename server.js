@@ -429,18 +429,12 @@ function buildHistoricalContext(run) {
     })
     .join(" | ");
 
-  const recentNotes = horseRuns
-    .filter(r => r.riderFeedback || r.notes)
-    .slice(0, 4)
-    .map(r => {
-      const parts = [];
-      if (r.riderFeedback) parts.push(`Rider felt: "${r.riderFeedback}"`);
-      if (r.notes) parts.push(`Notes: "${r.notes}"`);
-      return parts.join(" | ");
-    })
-    .join("\n  ");
+const currentRunNotes = [];
+      if (run.riderFeedback) currentRunNotes.push(`Rider felt: "${run.riderFeedback}"`);
+      if (run.notes) currentRunNotes.push(`Notes: "${run.notes}"`);
+      const currentRunNotesText = currentRunNotes.join(" | ");
 
-  return `
+      return `
 HORSE HISTORY FOR ${horseName.toUpperCase()} (${horseRuns.length} logged runs):
 - Personal best time: ${best ? best + "s" : "unknown"}
 - Average time: ${avg ? avg + "s" : "unknown"}
@@ -454,9 +448,9 @@ Arena condition performance:
 Recent show results:
   ${recentShows || "No show data available"}
 
-Recent rider feedback and notes:
-  ${recentNotes || "No recent notes available"}
-  `.trim();
+Notes for THIS run only:
+  ${currentRunNotesText || "No notes for this run"}
+`.trim();
 }
 
 // ─── Arena Distance / Split Normalization ─────────────────────────────────────
