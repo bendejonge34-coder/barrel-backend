@@ -800,16 +800,16 @@ Return ONLY this JSON:
 {
   "summary": "2-3 sentences. Reference the official time, the show or location if given, the slowest split by name and ft/s value, and the primary fault. Sound like a coach at the gate — direct and specific.",
   "timeLost": [
-    "PRIMARY: [fault term if applicable] at [barrel/section] ([split time]s at X ft/s) — explain the cause in one sentence using barrel racing language.",
-    "SECONDARY: A genuinely different fault at a DIFFERENT barrel/section from point 1. Supported by CV data or rider feedback.",
-    "THIRD: Only if a third distinct, real problem exists — otherwise omit this entry entirely."
-  ],
-  "improvements": [
-    "Directly fixes timeLost[0]: name the specific drill, which barrel, how to execute it.",
-    "Directly fixes timeLost[1]: specific and executable at their next training session.",
-    "Directly fixes timeLost[2] only if that entry exists."
+"State ONLY what the split data directly proves. Name the section, the time, the ft/s value, and what that number means for a horse running barrels. No speculation about cause.",
+    "A second section only if the data shows a second genuine time loss. Must reference a specific split value and section name.",
+    "Third entry only if a third distinct loss exists in the data — otherwise omit this entry entirely."  
+    ],
+"improvements": [
+    "DIRECTLY fixes the first time loss above. Start with the barrel or section name. Name the exact drill from the knowledge base. Tell the rider precisely how to execute it at their next practice — what to do, where to do it, how many times.",
+    "DIRECTLY fixes the second time loss above. Must be a different drill than improvement 1. Specific and executable. If no second time loss was identified, omit this entry.",
+    "DIRECTLY fixes the third time loss above only if that entry exists — otherwise omit entirely."
   ]
-}`.trim();
+    }`.trim();
 }
 
 function buildTextOnlyPrompt(run) {
@@ -976,7 +976,7 @@ async function processVideoJob(jobId) {
       messages: [
         {
           role: "system",
-          content: "You are an elite barrel racing coach. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns or approaches. You always return valid JSON only. No markdown, no preamble."
+          content: "You are an elite barrel racing coach. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns or approaches. You NEVER use labels like PRIMARY, SECONDARY, timeLost[0], or timeLost[1] in your responses. You always return valid JSON only. No markdown, no preamble."
         },
         {
           role: "user",
@@ -1047,7 +1047,7 @@ async function processTextJob(jobId) {
       messages: [
         {
           role: "system",
-          content: "You are an elite barrel racing coach. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns or approaches. You always return valid JSON only. No markdown, no preamble."
+          content: "You are an elite barrel racing coach. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns or approaches. You NEVER use labels like PRIMARY, SECONDARY, timeLost[0], or timeLost[1] in your responses. You always return valid JSON only. No markdown, no preamble."
         },
         { role: "user", content: buildTextOnlyPrompt(latestJob.run) }
       ],
