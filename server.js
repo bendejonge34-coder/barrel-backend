@@ -765,7 +765,6 @@ ${normalizedSections.map(s =>
 ► FASTEST BY SPEED: "${fastestSplit.label}" at ${fastestSplit.speed.toFixed(1)} ft/s
 
 NOTE: Slowest is determined by ft/s, not raw time. Base all coaching on the ft/s ranking above.` : "No splits available — use rider feedback and run data only."}
-
 ${coachingData}
 
 ${historicalContext}
@@ -798,7 +797,7 @@ RULES:
 
 Return ONLY this JSON:
 {
-  "summary": "2-3 sentences. Reference the official time, the show or location if given, the slowest split by name and ft/s value, and the primary fault. Sound like a coach at the gate — direct and specific.",
+  "summary": "2-3 sentences. Reference the official time, the show or location if given, the slowest split by name and ft/s value, and the primary fault. Sound like a coach at the gate — direct and specific. Never write n/a or N/A — if data is missing simply omit that detail.",
   "timeLost": [
 "State ONLY what the split data directly proves. Name the section, the time, the ft/s value, and what that number means for a horse running barrels. No speculation about cause.",
     "A second section only if the data shows a second genuine time loss. Must reference a specific split value and section name.",
@@ -847,7 +846,7 @@ ${historicalContext}
 
 Return ONLY this JSON:
 {
-  "summary": "2-3 sentences. Reference the actual time, show/location, and what the rider felt. Sound like a real coach at the gate — specific to this run.",
+  "summary": "2-3 sentences. Reference the actual time, show/location, and what the rider felt. Sound like a real coach at the gate — specific to this run. Never write n/a or N/A — if data is missing simply omit that detail.",
   "timeLost": [
     "Time loss 1 — identify the specific section, what likely happened there based on rider feedback, explained with barrel racing terminology.",
     "Time loss 2 — a DIFFERENT section or fault from point 1. Must be supported by data or feedback.",
