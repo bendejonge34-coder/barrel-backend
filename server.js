@@ -1413,6 +1413,57 @@ app.get("/guardian-status/:userId", (req, res) => {
   return res.json({ ok: true, confirmed, rejected, pending });
 });
 
+// ─── Generate Insights ────────────────────────────────────────────────────────
+
+app.post("/generate-insights", async (req, res) => {
+  try {
+    const { horseName, insights } = req.body;
+    if (!insights || !Array.isArray(insights) || insights.length === 0) {
+      return res.status(400).json({ error: "No insights data provided." });
+    }
+
+    const insightDescriptions = insights.map(i => {
+      return `Insight: ${i.title}\nKey: ${i.key}\nStats: ${JSON.stringify(i.stats)}`;
+    }).join("\n\n---\n\n");
+
+    const prompt = `You are a barrel racing data analyst. A rider has a horse named "${horseName}". Below are computed statistics from their run history. Write a short, conversational 2-3 sentence insight for EACH one. Be specific — use the actual numbers. Do not give coaching advice or guess at causes. Only state what the data shows.
+
+Format your response as JSON: { "timeTrend": "summary...", "personalBest": "summary...", ... }
+Use the "key" field as the JSON key for each insight.
+
+RULES:
+- Only reference numbers that are in the stats
+- No coaching advice, no "consider doing X"
+- Be conversational, like a smart friend reading your data
+- If a trend is clear, state it plainly
+- Keep each summary to 2-3 sentences max
+
+${insightDescriptions}`;
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+      max_tokens: 1500,
+    });
+
+    const content = response.choices?.[0]?.message?.content || "";
+
+    let summaries = {};
+    try {
+      const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+      summaries = JSON.parse(cleaned);
+    } catch {
+      console.error("Failed to parse AI insights response:", content);
+      summaries = {};
+    }
+
+    res.json({ summaries });
+  } catch (err) {
+    console.error("Generate insights error:", err);
+    res.status(500).json({ error: "Failed to generate insights." });
+  }
+});
 // ─── Error Handler ────────────────────────────────────────────────────────────
 
 app.use((err, _req, res, _next) => {
