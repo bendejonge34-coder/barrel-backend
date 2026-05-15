@@ -560,7 +560,7 @@ Return ONLY this JSON — no markdown, no extra text:
     "Fix for the first time loss. Name the drill, explain exactly how to run it at their next practice. Be specific — where, how many times, what to feel for.",
     "Fix for the second time loss. Must be a different drill from improvement 1.",
     "Fix for the third only if there was a third time loss."
-  ]
+]
 }`.trim();
 }
 
