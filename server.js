@@ -1,4 +1,3 @@
-import { execFile } from "child_process";
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
@@ -7,24 +6,14 @@ import multer from "multer";
 import OpenAI from "openai";
 import path from "path";
 import { Resend } from "resend";
-import { promisify } from "util";
 
 dotenv.config();
-
-const execFileAsync = promisify(execFile);
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.PORT || 3001);
-const EXEC_MAX_BUFFER = 1024 * 1024 * 50;
-const PYTHON_TIMEOUT_MS = 1000 * 60 * 12;
 const JOB_TTL_MS = 1000 * 60 * 60;
 
-const pythonExePath =
-  process.env.PYTHON_PATH ||
-  (process.platform === "win32" ? "python" : "python3");
-
-const pythonScriptPath = path.join(process.cwd(), "python", "analyze_run.py");
 const uploadsDir = path.join(process.cwd(), "uploads");
 const JOB_STORE_FILE = path.join(process.cwd(), "job-store.json");
 
@@ -33,9 +22,6 @@ const JOB_STORE_FILE = path.join(process.cwd(), "job-store.json");
 console.log("===== SERVER START =====");
 console.log("[BOOTED]", new Date().toISOString());
 console.log("Port:", PORT);
-console.log("Python:", pythonExePath);
-console.log("Script:", pythonScriptPath);
-console.log("Uploads:", uploadsDir);
 console.log("========================");
 
 // ─── OpenAI ───────────────────────────────────────────────────────────────────
@@ -331,45 +317,6 @@ function restoreJobs() {
   }
 }
 
-// ─── Python Runner ────────────────────────────────────────────────────────────
-
-async function runPythonAnalysis(videoPath, run = {}) {
-  console.log("[PYTHON] Starting analysis:", videoPath);
-
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      pythonExePath,
-      [pythonScriptPath, videoPath, JSON.stringify(run)],
-      {
-        maxBuffer: EXEC_MAX_BUFFER,
-        timeout: PYTHON_TIMEOUT_MS,
-        env: { ...process.env, PYTHONUNBUFFERED: "1", YOLO_CONFIG_DIR: "/tmp/Ultralytics" },
-      }
-    );
-
-    if (stderr?.trim()) console.warn("[PYTHON STDERR]", preview(stderr, 400));
-    console.log("[PYTHON] stdout length:", String(stdout || "").length);
-
-    const result = safeParseJson(stdout) || extractLastJsonObject(stdout);
-    if (!result) {
-      console.error("[PYTHON] Invalid output:", preview(stdout));
-      throw new Error("Python returned invalid JSON.");
-    }
-    if (!result.ok) throw new Error(result.error || "Python analysis failed.");
-
-    return result;
-  } catch (err) {
-    if (err?.stdout) {
-      const recovered = safeParseJson(err.stdout) || extractLastJsonObject(err.stdout);
-      if (recovered?.ok) return recovered;
-      if (recovered) throw new Error(recovered.error || "Python analysis failed.");
-    }
-    if (err?.killed || err?.signal === "SIGTERM") throw new Error("Python analysis timed out.");
-    if (err?.code === "ETIMEDOUT") throw new Error("Python analysis timed out.");
-    throw err;
-  }
-}
-
 // ─── Historical Context Builder ───────────────────────────────────────────────
 
 function buildHistoricalContext(run) {
@@ -377,7 +324,7 @@ function buildHistoricalContext(run) {
   const horseName = run?.horse || "this horse";
 
   if (!history || history.length === 0) {
-    return `No previous run history available for ${horseName}. This appears to be the first logged run.`;
+    return `No previous run history available for ${horseName}.`;
   }
 
   const horseRuns = history.filter(r => r.horse === horseName && r.time && !isNaN(parseFloat(r.time)));
@@ -391,25 +338,24 @@ function buildHistoricalContext(run) {
 
   const best = times.length > 0 ? Math.min(...times) : null;
   const avg = times.length > 0 ? (times.reduce((a, b) => a + b, 0) / times.length).toFixed(3) : null;
-  const worst = times.length > 0 ? Math.max(...times) : null;
 
   const recent3 = times.slice(0, 3);
   const prior3 = times.slice(3, 6);
-  let trend = "insufficient data for trend";
+  let trend = "not enough data yet";
   if (recent3.length >= 2 && prior3.length >= 2) {
     const recentAvg = recent3.reduce((a, b) => a + b, 0) / recent3.length;
     const priorAvg = prior3.reduce((a, b) => a + b, 0) / prior3.length;
     const diff = (recentAvg - priorAvg).toFixed(3);
-    if (recentAvg < priorAvg) trend = `improving (${Math.abs(diff)}s faster recently)`;
-    else if (recentAvg > priorAvg) trend = `slower recently (${diff}s off pace)`;
-    else trend = "consistent";
+    if (recentAvg < priorAvg) trend = `getting faster — down ${Math.abs(diff)}s on average recently`;
+    else if (recentAvg > priorAvg) trend = `running a bit slower lately — up ${diff}s on average`;
+    else trend = "holding steady";
   }
 
   let vsPersonalBest = "";
   if (best && !isNaN(currentTime)) {
     const diff = (currentTime - best).toFixed(3);
-    if (diff <= 0) vsPersonalBest = `This is a NEW PERSONAL BEST by ${Math.abs(diff)}s!`;
-    else vsPersonalBest = `This run is ${diff}s off the personal best.`;
+    if (diff <= 0) vsPersonalBest = `New personal best by ${Math.abs(diff)}s.`;
+    else vsPersonalBest = `${diff}s off the personal best of ${best}s.`;
   }
 
   const arenaHistory = horseRuns
@@ -429,27 +375,20 @@ function buildHistoricalContext(run) {
     })
     .join(" | ");
 
-const currentRunNotes = [];
-      if (run.riderFeedback) currentRunNotes.push(`Rider felt: "${run.riderFeedback}"`);
-      if (run.notes) currentRunNotes.push(`Notes: "${run.notes}"`);
-      const currentRunNotesText = currentRunNotes.join(" | ");
+  const currentRunNotes = [];
+  if (run.riderFeedback) currentRunNotes.push(`Rider felt: "${run.riderFeedback}"`);
+  if (run.notes) currentRunNotes.push(`Notes: "${run.notes}"`);
+  const currentRunNotesText = currentRunNotes.join(" | ");
 
-      return `
-HORSE HISTORY FOR ${horseName.toUpperCase()} (${horseRuns.length} logged runs):
-- Personal best time: ${best ? best + "s" : "unknown"}
-- Average time: ${avg ? avg + "s" : "unknown"}
-- Worst time: ${worst ? worst + "s" : "unknown"}
-- Performance trend: ${trend}
+  return `
+HISTORY FOR ${horseName.toUpperCase()} (${horseRuns.length} logged runs):
+- Personal best: ${best ? best + "s" : "unknown"}
+- Average: ${avg ? avg + "s" : "unknown"}
+- Trend: ${trend}
 - ${vsPersonalBest}
-
-Arena condition performance:
-  ${arenaHistory || "No arena condition data available"}
-
-Recent show results:
-  ${recentShows || "No show data available"}
-
-Notes for THIS run only:
-  ${currentRunNotesText || "No notes for this run"}
+- Arena conditions: ${arenaHistory || "none logged"}
+- Recent shows: ${recentShows || "none logged"}
+- This run notes: ${currentRunNotesText || "none"}
 `.trim();
 }
 
@@ -491,241 +430,70 @@ function normalizeSplitsToSpeed(splits, distances) {
 // ─── Barrel Racing Knowledge Base ─────────────────────────────────────────────
 
 const BARREL_RACING_KNOWLEDGE_BASE = `
-=== BARREL RACING EXPERT COACHING KNOWLEDGE ===
-You are an elite barrel racing coach. Apply this knowledge to every analysis.
+=== BARREL RACING COACHING KNOWLEDGE ===
+You are a seasoned barrel racing coach. You talk like you're standing at the gate — direct, plain, and specific to what just happened. No textbook language. No invented labels. Just real talk that a competitive barrel racer would respect and actually use.
 
-── CORE PHILOSOPHY ────────────────────────────────────────────────────────────
-"Speed is a byproduct of correctness. If you fix the mechanics, the clock will follow."
-The straightaways are for speed. The turns are for precision. If you don't set up the approach, you've lost the turn before you even get there.
-The turn doesn't start AT the barrel — it starts 15 feet before it. Every single time.
+── HOW THE PATTERN WORKS ──────────────────────────────────────────────────────
+The straightaways are where you make up time. The turns are where you lose it if you're sloppy.
+The turn doesn't start at the barrel — it starts about 15 feet out. If you're not set up by then, the barrel already beat you.
+First barrel sets the whole run. Get that one right and the rest follows.
 
-── THE APPROACH & THE POCKET ──────────────────────────────────────────────────
-THE FIRST BARREL — "The Money Barrel"
-Highest speed entry of the run. Sets up everything that follows.
-Use a "J" approach — aim for a point 5 to 8 feet to the side of the barrel. Never run straight at it.
-The Pocket: The horse needs enough room to arc its ribcage cleanly through the turn. Too tight = hind end clips the backside of the barrel.
+── THE APPROACH ───────────────────────────────────────────────────────────────
+Don't run straight at the barrel. Angle off to the side — give yourself room to arc around it cleanly.
+The pocket is the area just before the barrel where you rate down and set up the turn. Get to the pocket right and the turn takes care of itself.
+After the first barrel, stop looking at the next barrel. Look at where you want the horse's feet to go — the entry point, not the barrel itself.
 
-THE SECOND AND THIRD BARRELS — Cross-Firing Your Vision
-These require "cross-firing" your vision.
-As you leave the first barrel, look at the ENTRY POINT of the second barrel — not the barrel itself.
-"Don't look at the barrel. If you look at the barrel, you'll hit it. Look where you want the horse's feet to go."
-
-── THE RATE POINT ─────────────────────────────────────────────────────────────
-Rate = shifting weight from the front end to the hocks to prepare for the turn.
-Cue: As the horse's nose reaches the barrel, "sit deep in your pockets." Sink your weight into your seat bones.
-Rate too early = lose speed unnecessarily. Rate too late = "going long" — overshooting the turn, losing both time and line.
+── RATING ─────────────────────────────────────────────────────────────────────
+Rating is when the horse shifts its weight back onto its hocks and gears down for the turn.
+The cue is sitting deep — sink into your seat bones as the horse's nose reaches the barrel.
+Rate too early and you give up speed for nothing. Rate too late and the horse blows past the pocket and you're scrambling to recover.
 
 ── THE TURN ───────────────────────────────────────────────────────────────────
-Keep the horse's inside shoulder UP. A dropped shoulder causes slicing, loss of arc, and knocked barrels.
-The horse should bend around your inside leg — ribcage arc ensures hind feet follow front feet in a single track for maximum traction.
-Do NOT commit to the turn until your leg (cinch area) has passed the barrel.
-Finish the turn completely. Leaving early causes a poor line to the next barrel.
+Keep that inside shoulder up. A dropped shoulder kills your arc and puts you right into the barrel.
+The horse needs to bend through its whole body — ribs, not just neck. If the neck bends but the ribs stay stiff, you're losing traction through the turn.
+Don't leave the barrel until your leg — at the cinch — has passed it. Leaving early messes up your line to the next one.
+Finish the turn. Riders lose more time leaving early than almost anything else.
 
-── RIDER HAND POSITION ────────────────────────────────────────────────────────
-Keep hands LOW at all times. High hands = high-headed horse.
-Inside Hand: Guides the nose. Creates a soft arc into the turn — never a sharp pull.
-Outside Hand: "The Wall." Keeps the horse from drifting out and keeps the inside shoulder upright.
-Never "hunt" for the horn until AFTER you have sat deep in your seat.
+── RIDER POSITION ─────────────────────────────────────────────────────────────
+On the straightaways, get up off their back a little. Let them run.
+Through the turn, sit straight. Don't lean into it like a motorcycle — that shifts weight onto the inside shoulder and slows the horse down.
+Hands low. Always. High hands bring the head up and kill collection.
+Inside hand guides the nose softly. Outside hand keeps the shoulder from drifting out.
+Don't grab the horn until you've already sat deep. Reaching for it early tips your weight forward at the worst time.
 
-── RIDER SEAT & BODY POSITION ─────────────────────────────────────────────────
-Straightaways: Stand slightly in your stirrups (two-point position). Let the horse run.
-The Rate: Sit DEEP in your pockets. This IS the physical cue for the horse to shift weight to its hocks.
-Through the turn: Spine aligned with horse's spine. Do NOT lean (motorcycle lean).
-After the turn: Immediately forward and athletic. Push the horse to the next spot.
+── WHAT CAUSES SLOW SPLITS ────────────────────────────────────────────────────
+Slow into the first barrel: Usually the approach — came in too fast, wrong angle, or didn't get to the pocket in time. Sometimes alley nerves.
+Slow first to second, or second to third: Horse isn't extending on the straightaway. Either the rider is holding them back, or the horse is still in rate mode and hasn't opened back up.
+Slow third barrel to home: Rider didn't get forward and push. Horse ran out of gas or wasn't asked.
+One section way slower than the rest: Something specific happened at that barrel — worth drilling that turn specifically.
+Everything slow and consistent: Horse isn't extending anywhere, or the rider is restraining them throughout.
 
-── COMMON FAULTS & EXACT FIXES ────────────────────────────────────────────────
-
-1. DIVING INTO THE TURN (Pocket Killer #1)
-Riders lean their body or pull the horse's nose toward the barrel too early.
-Fix drill: "Square the Barrel" — Approach at a TROT. Ride a literal square around the barrel instead of a circle. Forces the rider to wait before turning.
-
-2. LOOKING AT THE BARREL
-Your horse follows your eyes. If you stare at the barrel, your body weight shifts and the horse follows into a collision.
-Fix drill: "The Look Ahead / Horizon Drill" — Focus on a spot 10 feet PAST each barrel as you approach it.
-
-3. SHOULDERS DROPPING ("Washing Out")
-Horse drops inside shoulder, losing leverage and power in the turn.
-Fix drill: "Counter-Bending Circles" — Circle the barrel while bending the horse's nose AWAY from the barrel. Lifts inside shoulder and engages hindquarters.
-
-4. OVER-HANDLING / SAWING ON THE BIT
-Riders "saw" on the bit or pull the inside rein throughout the entire turn.
-Fix drill A: "The One-Handed Guide" — Work the pattern at a trot or slow lope using ONLY your dominant riding hand.
-Fix drill B: "Loose Rein Loping" — Lope a large circle around the barrel on a completely loose rein, using only weight and legs.
-
-5. FAILING TO FINISH THE TURN (Early Exit)
-Leaving the barrel too early, resulting in a compromised line to the next barrel.
-Fix drill: "The One-and-a-Half" — Make a full circle around the barrel PLUS another half-turn before heading to the next.
-
-6. IMPROPER POCKET — RUNNING TOO TIGHT
-Horse clips the barrel with shoulder, hip, or hind end.
-Fix drill: "The Pinwheel" — Set up 4 cones around a barrel at 5-foot intervals. Practice spiraling in and out at a trot.
-
-7. GETTING AHEAD OF THE HORSE
-Leaning forward over the neck before the horse has finished the turn.
-Fix drill: "The Deep Sit Stop" — Lope the pattern and ask for a complete stop at the backside of every barrel.
-
-8. LACK OF RATE (Running Past)
-The horse "blows" past the barrel because they didn't gear down.
-Fix drill: "Transition Points" — Pick a point 15 feet before the barrel. Every time you hit that point, transition from a lope to a trot. Builds rate muscle memory.
-
-9. SHOULDERING IN
-Horse leans into barrel, knocks it with shoulder or rider's knee.
-Fix: More inside leg at the girth, more outside rein.
-Fix drill: "Counter-Bending Circles" (same as fault #3).
-
-10. INCONSISTENT ALLEYWAY BEHAVIOR
-Fighting in the alley causes stressed entry, poor alignment, rushed approach.
-Fix drill: "Quiet Entry" — Walk into alley, stop, back up, sit quietly until horse exhales, then walk out calmly. Repeat.
-
-── FAULT DIAGNOSIS FROM SPLIT DATA ────────────────────────────────────────────
-Slow alley→1st: Alley stress, wrong approach angle, failure to rate at the right point, or diving too early.
-Slow 1st→2nd or 2nd→3rd: Horse not driving between barrels. Rider getting left behind. Horse still in rate mode — not extending on the straightaway.
-Slow 3rd→home: Rider not in two-point pushing forward. Horse not rated out cleanly. Fatigue.
-One split dramatically slower than others: Problem is SPECIFIC to that barrel.
-All splits slow but consistent: Horse not extending on straightaways, OR rider restraining horse through entire run.
+── DRILLS THAT ACTUALLY WORK ──────────────────────────────────────────────────
+Not rating — pick a spot 15 feet out from the barrel. Every time you hit that spot at a lope, transition to a trot. Do it until it's automatic, then speed it up.
+Dropping a shoulder or drifting — lope circles around the barrel with the horse's nose tipped slightly away from the barrel. Keeps the shoulder up and gets them bending through the ribs.
+Leaving the turn too early — lope the pattern and stop completely at the backside of every barrel. Gets the horse waiting for the cue instead of anticipating.
+Diving in or pulling too hard — work the pattern one-handed at a trot. Forces you to guide with your body instead of your hands.
+Rushing the approach — walk the pattern. All three barrels. Do it five times before you ever pick up speed. It builds patience and precision.
+Drifting off the barrel entry line — set up 4 cones around the barrel in a cross pattern about 5 feet out. Spiral in and out at a trot until the approach is automatic.
 `;
-
-// ─── CV Coaching Data Builder ─────────────────────────────────────────────────
-// Converts Python's CV output into a clean text summary for the AI prompt.
-
-function buildBarrelCoachingData(run, pythonResult) {
-  const speedSummary = pythonResult?.speed_summary || null;
-  const splits = pythonResult?.splits || {};
-  const insights = Array.isArray(pythonResult?.insights) ? pythonResult.insights : [];
-
-  let speedReport = "Speed data: not available";
-  if (speedSummary) {
-    const lines = ["Run speed profile:"];
-    if (speedSummary.slowest_section_label) lines.push(`  - SLOWEST section: ${speedSummary.slowest_section_label}`);
-    if (speedSummary.fastest_section_label) lines.push(`  - Fastest section: ${speedSummary.fastest_section_label}`);
-    if (speedSummary.section_speeds) {
-      const s = speedSummary.section_speeds;
-      lines.push(`  - Alley→1st: ${s.alley_to_barrel1 ?? "n/a"}px/s | 1st→2nd: ${s.barrel1_to_barrel2 ?? "n/a"}px/s | 2nd→3rd: ${s.barrel2_to_barrel3 ?? "n/a"}px/s | 3rd→Home: ${s.barrel3_to_home ?? "n/a"}px/s`);
-    }
-    speedReport = lines.join("\n");
-  }
-
-  // Prefer manual splits (ground truth) over CV splits (estimates)
-  const manualSplits = run?.manualSplits || null;
-  const activeSplits = manualSplits || splits || {};
-  const splitsSource = manualSplits ? "user-marked and scaled to official time" : "CV-estimated";
-
-  let s1 = activeSplits?.start_to_barrel1_seconds ?? null;
-  let s2 = activeSplits?.barrel1_to_barrel2_seconds ?? null;
-  let s3 = activeSplits?.barrel2_to_barrel3_seconds ?? null;
-  let s4 = activeSplits?.barrel3_to_home_seconds ?? null;
-
-  // Scale CV splits to official run time if no manual splits
-  if (!manualSplits && run?.time) {
-    const officialTime = parseFloat(run.time);
-    const cvTotal = [s1, s2, s3, s4].reduce((sum, v) => sum + (Number.isFinite(Number(v)) ? Number(v) : 0), 0);
-    if (cvTotal > 0 && officialTime > 0 && Math.abs(cvTotal - officialTime) > 0.1) {
-      const scale = officialTime / cvTotal;
-      if (s1 != null) s1 = parseFloat((Number(s1) * scale).toFixed(2));
-      if (s2 != null) s2 = parseFloat((Number(s2) * scale).toFixed(2));
-      if (s3 != null) s3 = parseFloat((Number(s3) * scale).toFixed(2));
-      if (s4 != null) s4 = parseFloat((Number(s4) * scale).toFixed(2));
-    }
-  }
-
-  const splitMap = {
-    "Start to 1st Barrel":  s1,
-    "1st to 2nd Barrel":    s2,
-    "2nd to 3rd Barrel":    s3,
-    "3rd Barrel to Finish": s4,
-  };
-  const arenaDist = getArenaDistances(run);
-  const normalized = normalizeSplitsToSpeed(
-    Object.fromEntries(Object.entries(splitMap).filter(([, v]) => v != null && Number.isFinite(Number(v)))),
-    arenaDist
-  );
-  const slowestBySpeed = normalized[0] || null;
-  const fastestBySpeed = normalized[normalized.length - 1] || null;
-
-  const splitReport = normalized.length > 0
-    ? `Split times by speed — ${splitsSource} (Pattern A distances):
-${normalized.map(s => `  - ${s.label}: ${s.seconds.toFixed(2)}s / ${s.distance}ft = ${s.speed.toFixed(1)} ft/s`).join("\n")}
-${slowestBySpeed ? `  ► SLOWEST by speed: ${slowestBySpeed.label} at ${slowestBySpeed.speed.toFixed(1)} ft/s` : ""}
-${fastestBySpeed ? `  ► FASTEST by speed: ${fastestBySpeed.label} at ${fastestBySpeed.speed.toFixed(1)} ft/s` : ""}`
-    : "Split times: not available";
-
-  // Barrel proximity summary from frame metrics
-  const frameMetrics = Array.isArray(pythonResult?.frame_metrics) ? pythonResult.frame_metrics : [];
-  const barrelProximity = ["barrel1", "barrel2", "barrel3"].map(name => {
-    const distKey = `dist_to_${name}_px`;
-    const dists = frameMetrics.filter(m => m[distKey] != null).map(m => m[distKey]);
-    if (dists.length === 0) return `${name}: no proximity data`;
-    const minDist = Math.min(...dists);
-    const label = { barrel1: "1st", barrel2: "2nd", barrel3: "3rd" }[name];
-    return `  - ${label} barrel: closest approach ${Math.round(minDist)}px from center`;
-  }).join("\n");
-
-  return `
-=== COMPUTER VISION COACHING DATA ===
-
-Run overview:
-- Duration: ${pythonResult?.duration_seconds ?? "unknown"}s
-- Pattern direction: ${pythonResult?.pattern_direction ?? "unknown"}-first
-- Horse tracked: ${pythonResult?.horse_detected_frames ?? "?"} frames
-- Total frames analyzed: ${pythonResult?.tracking_quality?.sampled_frame_count ?? "?"}
-
-${splitReport}
-
-${speedReport}
-
-Barrel proximity (how close horse got to each barrel center):
-${barrelProximity}
-
-CV insights:
-${insights.length ? insights.map(i => `- ${i}`).join("\n") : "- None"}
-
-Run data:
-- Horse: ${run?.horse || "not provided"}
-- Official time: ${run?.time || "not provided"}s
-- Show: ${run?.showName || "not provided"}
-- Location: ${run?.location || "not provided"}
-- Arena: ${run?.arenaCondition || "not provided"}
-- Placing: ${run?.placing || "not provided"}
-- Earnings: $${run?.earnings || "0"}
-- Rider felt: "${run?.riderFeedback || "no feedback provided"}"
-- Notes: "${run?.notes || "none"}"
-- Manual splits: ${run?.manualSplits ? "YES — highly accurate" : "No"}
-  `.trim();
-}
 
 // ─── AI Prompt Builders ───────────────────────────────────────────────────────
 
-function buildCoachingPrompt(run, pythonResult) {
-  const coachingData = buildBarrelCoachingData(run, pythonResult);
+function buildCoachingPrompt(run) {
   const historicalContext = buildHistoricalContext(run);
   const horseName = run?.horse || "this horse";
   const riderName = run?.rider || "the rider";
 
-  // Penalty time calculation
   const baseTime = parseFloat(run?.time) || 0;
   const penaltySeconds = run?.knockedPenalty === "+5" && run?.knockedBarrels?.length > 0
     ? run.knockedBarrels.length * 5 : 0;
   const officialTime = baseTime + penaltySeconds;
 
-  // Normalize splits for the prompt
   const manualSplits = run?.manualSplits || null;
-  const cvSplits = pythonResult?.splits || {};
-  const rawSplits = manualSplits || cvSplits;
-  let sp1 = rawSplits?.start_to_barrel1_seconds ?? null;
-  let sp2 = rawSplits?.barrel1_to_barrel2_seconds ?? null;
-  let sp3 = rawSplits?.barrel2_to_barrel3_seconds ?? null;
-  let sp4 = rawSplits?.barrel3_to_home_seconds ?? null;
-
-  if (!manualSplits && baseTime > 0) {
-    const cvTotal = [sp1, sp2, sp3, sp4].reduce((sum, v) => sum + (Number.isFinite(Number(v)) ? Number(v) : 0), 0);
-    if (cvTotal > 0 && Math.abs(cvTotal - baseTime) > 0.1) {
-      const scale = baseTime / cvTotal;
-      if (sp1 != null) sp1 = parseFloat((Number(sp1) * scale).toFixed(2));
-      if (sp2 != null) sp2 = parseFloat((Number(sp2) * scale).toFixed(2));
-      if (sp3 != null) sp3 = parseFloat((Number(sp3) * scale).toFixed(2));
-      if (sp4 != null) sp4 = parseFloat((Number(sp4) * scale).toFixed(2));
-    }
-  }
+  let sp1 = manualSplits?.start_to_barrel1_seconds ?? null;
+  let sp2 = manualSplits?.barrel1_to_barrel2_seconds ?? null;
+  let sp3 = manualSplits?.barrel2_to_barrel3_seconds ?? null;
+  let sp4 = manualSplits?.barrel3_to_home_seconds ?? null;
 
   const splitRawMap = {
     "Start to 1st Barrel":  sp1,
@@ -741,74 +509,59 @@ function buildCoachingPrompt(run, pythonResult) {
   const slowestSplit = normalizedSections[0] || null;
   const fastestSplit = normalizedSections[normalizedSections.length - 1] || null;
   const hasSplits = normalizedSections.length > 0;
-  const splitsLabel = manualSplits ? "user-marked, scaled to official time" : "CV-estimated, scaled to official time";
 
   return `${BARREL_RACING_KNOWLEDGE_BASE}
 
-=== RUN DATA ===
+=== THIS RUN ===
 Horse: ${horseName} | Rider: ${riderName}
-Official time: ${run?.knockedPenalty === "nt" ? "N-T (barrel knocked — no time)" : officialTime > 0 ? officialTime.toFixed(2) + "s" + (penaltySeconds > 0 ? ` (includes +${penaltySeconds}s penalty)` : "") : "not recorded"}
+Time: ${run?.knockedPenalty === "nt" ? "N-T (knocked barrel, no time)" : officialTime > 0 ? officialTime.toFixed(3) + "s" + (penaltySeconds > 0 ? ` (base ${baseTime.toFixed(3)}s + ${penaltySeconds}s penalty)` : "") : "not recorded"}
 Show: ${run?.showName || "—"} | Location: ${run?.location || "—"} | Date: ${run?.runDate || "—"}
-Arena: ${run?.arenaCondition || "not provided"} | Placing: ${run?.placing || "—"}
+Arena condition: ${run?.arenaCondition || "not provided"} | Placing: ${run?.placing || "—"}
 Knocked barrels: ${run?.knockedBarrels?.length > 0 ? `Barrel ${run.knockedBarrels.join(", ")} — ${run.knockedPenalty === "nt" ? "N-T" : `+${run.knockedBarrels.length * 5}s`}` : "none"}
 Rider felt: "${run?.riderFeedback || "no feedback"}"
 Notes: "${run?.notes || "none"}"
-${hasSplits ? `
-SPLIT TIMES WITH SPEED NORMALIZATION (${splitsLabel}):
-Arena distances — Start→B1: ${arenaDist["Start to 1st Barrel"]}ft | B1→B2: ${arenaDist["1st to 2nd Barrel"]}ft | B2→B3: ${arenaDist["2nd to 3rd Barrel"]}ft | B3→Finish: ${arenaDist["3rd Barrel to Finish"]}ft${run?.arenaDistances ? " (user-entered)" : " (WPRA Pattern A defaults)"}
 
-${normalizedSections.map(s =>
-  `  ${s.label}: ${s.seconds.toFixed(2)}s over ${s.distance}ft = ${s.speed.toFixed(1)} ft/s`
-).join("\n")}
+${hasSplits ? `SPLIT TIMES (user-marked, scaled to official time):
+Arena: Start→B1: ${arenaDist["Start to 1st Barrel"]}ft | B1→B2: ${arenaDist["1st to 2nd Barrel"]}ft | B2→B3: ${arenaDist["2nd to 3rd Barrel"]}ft | B3→Finish: ${arenaDist["3rd Barrel to Finish"]}ft${run?.arenaDistances ? " (rider entered)" : " (WPRA Pattern A)"}
 
-► SLOWEST BY SPEED: "${slowestSplit.label}" at ${slowestSplit.speed.toFixed(1)} ft/s — THIS IS WHERE THE HORSE WAS GENUINELY SLOWEST
-► FASTEST BY SPEED: "${fastestSplit.label}" at ${fastestSplit.speed.toFixed(1)} ft/s
+${normalizedSections.map(s => `  ${s.label}: ${s.seconds.toFixed(3)}s — ${s.speed.toFixed(1)} ft/s`).join("\n")}
 
-NOTE: Slowest is determined by ft/s, not raw time. Base all coaching on the ft/s ranking above.` : "No splits available — use rider feedback and run data only."}
-${coachingData}
+Slowest section by speed: ${slowestSplit ? `"${slowestSplit.label}" at ${slowestSplit.speed.toFixed(1)} ft/s` : "unknown"}
+Fastest section by speed: ${fastestSplit ? `"${fastestSplit.label}" at ${fastestSplit.speed.toFixed(1)} ft/s` : "unknown"}
+
+Speed is calculated from feet per second — not raw time. The slowest ft/s is where the horse was genuinely losing ground regardless of section length.` : "No splits available — coach from rider feedback and run data only."}
 
 ${historicalContext}
 
-=== YOUR TASK ===
-You are a barrel racing coach analyzing ${riderName}'s run on ${horseName}.
-You have detailed computer vision data including split times, barrel proximity, and speed profile.
-No video frames are available — coach entirely from the CV data and rider feedback above.
+=== YOUR JOB ===
+You're the coach at the gate after this run. Talk like it. Short, specific, no fluff.
 
-FAULT FRAMEWORK — use these terms when they apply:
-- Rider: "The Tilter" (leaning in) | "The Reacher" (hands forward/pulling)
-- Horse body: "Log Stiff" (no arc) | "Shoulder-Pop" (shoulder pushes out)
-- Rate: "Downhill Run" (on forehand) | "Stiff-Legged" (choppy, no collection)
-- Exit: "The Fishtail" (hind swings out) | "Wandering" (drifts off line)
-
-RULES:
-- Identify what went wrong at the SLOWEST split
-- Explain why using the fault framework and knowledge base
-- Give specific, executable fixes with named drills
-- Reference the slowest split by name and ft/s value
-- Use proper barrel racing terminology throughout
+WHAT THIS MEANS IN PRACTICE:
+- Don't say "it appears" or "it seems" — state what the data shows
+- Don't say "wide" or "narrow" to describe turns — ever
+- Don't use invented labels or categories — just describe what happened in plain language
+- Don't repeat the same drill across multiple improvements — each one should be different
+- Don't pad — if there's only one real problem, say one thing
+- Reference the actual split times and ft/s values when you have them
+- If the rider gave feedback, connect it to what the splits show
 - Call barrels by name: first barrel, second barrel, third barrel
-- If rider feedback describes a problem, connect it to the correct fault term
-- NO generic advice — every point must be specific to this run's data
-- Do NOT say a turn was "wide" or "narrow" — ever
-- Do NOT mention degrees, angles, or pixel measurements
-- Do NOT contradict the split data
-- If only 1 or 2 genuine time losses exist, return 1 or 2 — do not pad
-- Return ONLY valid JSON. No markdown. No extra text.
+- Vary your language run to run — don't use the same phrases every time
+- Sound like a real person who knows barrel racing, not a textbook
 
-Return ONLY this JSON:
+Return ONLY this JSON — no markdown, no extra text:
 {
-  "summary": "2-3 sentences. Reference the official time, the show or location if given, the slowest split by name and ft/s value, and the primary fault. Sound like a coach at the gate — direct and specific. Never write n/a or N/A — if data is missing simply omit that detail.",
+  "summary": "2-3 sentences max. Lead with the time and where this run stood — new PB, off pace, solid run. Then name the one thing that cost the most time, using the split data if available. Gate-side voice — direct and specific.",
   "timeLost": [
-"State ONLY what the split data directly proves. Name the section, the time, the ft/s value, and what that number means for a horse running barrels. No speculation about cause.",
-    "A second section only if the data shows a second genuine time loss. Must reference a specific split value and section name.",
-    "Third entry only if a third distinct loss exists in the data — otherwise omit this entry entirely."  
-    ],
-"improvements": [
-    "DIRECTLY fixes the first time loss above. Start with the barrel or section name. Name the exact drill from the knowledge base. Tell the rider precisely how to execute it at their next practice — what to do, where to do it, how many times.",
-    "DIRECTLY fixes the second time loss above. Must be a different drill than improvement 1. Specific and executable. If no second time loss was identified, omit this entry.",
-    "DIRECTLY fixes the third time loss above only if that entry exists — otherwise omit entirely."
+    "Name the section, the ft/s value if available, and what that actually means for this horse on this run. No speculation — only what the data directly shows.",
+    "Second section only if the data shows a real second loss. Must be a different section from the first.",
+    "Third only if genuinely supported by the data — otherwise leave it out."
+  ],
+  "improvements": [
+    "Fix for the first time loss. Name the drill, explain exactly how to run it at their next practice. Be specific — where, how many times, what to feel for.",
+    "Fix for the second time loss. Must be a different drill from improvement 1.",
+    "Fix for the third only if there was a third time loss."
   ]
-    }`.trim();
+}`.trim();
 }
 
 function buildTextOnlyPrompt(run) {
@@ -816,49 +569,49 @@ function buildTextOnlyPrompt(run) {
   const horseName = run?.horse || "this horse";
   const riderName = run?.rider || "the rider";
 
-  return `
-${BARREL_RACING_KNOWLEDGE_BASE}
+  const baseTime = parseFloat(run?.time) || 0;
+  const penaltySeconds = run?.knockedPenalty === "+5" && run?.knockedBarrels?.length > 0
+    ? run.knockedBarrels.length * 5 : 0;
+  const officialTime = baseTime + penaltySeconds;
 
-=== YOUR TASK ===
+  return `${BARREL_RACING_KNOWLEDGE_BASE}
 
-No video available. Coach ${riderName} on ${horseName} using their run data, their own feedback, and their history. Apply the knowledge base above — sound like a real barrel racing professional.
-
-RULES:
-- Acknowledge once that there's no video, then move on immediately
-- Address the rider's own feedback directly using proper terminology from the knowledge base
-- Use history context — personal best, trend, arena conditions
-- Every sentence must be useful. No filler.
-- Do NOT say a turn was "wide" or "narrow" — ever
-- Return ONLY valid JSON. No markdown. No extra text.
-
-THIS RUN:
-- Horse: ${horseName}
-- Time: ${run?.time || "not provided"}s
-- Show: ${run?.showName || "not provided"}
-- Location: ${run?.location || "not provided"}
-- Arena: ${run?.arenaCondition || "not provided"}
-- Placing: ${run?.placing || "not provided"}
-- Earnings: $${run?.earnings || "0"}
-- Rider felt: "${run?.riderFeedback || "no feedback provided"}"
-- Notes: "${run?.notes || "none"}"
+=== THIS RUN ===
+Horse: ${horseName} | Rider: ${riderName}
+Time: ${run?.knockedPenalty === "nt" ? "N-T (knocked barrel, no time)" : officialTime > 0 ? officialTime.toFixed(3) + "s" + (penaltySeconds > 0 ? ` (base ${baseTime.toFixed(3)}s + ${penaltySeconds}s penalty)` : "") : "not recorded"}
+Show: ${run?.showName || "—"} | Location: ${run?.location || "—"}
+Arena condition: ${run?.arenaCondition || "not provided"} | Placing: ${run?.placing || "—"}
+Rider felt: "${run?.riderFeedback || "no feedback provided"}"
+Notes: "${run?.notes || "none"}"
 
 ${historicalContext}
 
+=== YOUR JOB ===
+No video, no splits. Coach ${riderName} on ${horseName} from their own feedback and run history.
+Talk like you're at the gate — plain, direct, no fluff. One sentence to acknowledge there's no video data, then get into it.
+
+RULES:
+- Connect the rider's own words to what likely happened on the pattern
+- Use the history — is this better or worse than usual? Is this a pattern?
+- Don't say "wide" or "narrow" to describe turns
+- Don't invent faults you can't support from the feedback
+- Vary your language — don't use the same phrases every time
+- Return ONLY valid JSON, no markdown
+
 Return ONLY this JSON:
 {
-  "summary": "2-3 sentences. Reference the actual time, show/location, and what the rider felt. Sound like a real coach at the gate — specific to this run. Never write n/a or N/A — if data is missing simply omit that detail.",
+  "summary": "2-3 sentences. Reference the time, what the rider felt, and how it compares to their history. Direct and specific.",
   "timeLost": [
-    "Time loss 1 — identify the specific section, what likely happened there based on rider feedback, explained with barrel racing terminology.",
-    "Time loss 2 — a DIFFERENT section or fault from point 1. Must be supported by data or feedback.",
-    "Third time loss only if a third genuine loss is identifiable — otherwise omit."
+    "What likely cost time based on rider feedback — connect their words to the pattern using barrel racing terminology.",
+    "A second issue only if the feedback or data supports it. Must be different from the first.",
+    "Third only if genuinely supported."
   ],
   "improvements": [
-    "Directly fixes time loss 1 — name a specific drill and how to execute it.",
-    "Directly fixes time loss 2 — specific and executable at their next training session.",
-    "Directly fixes time loss 3 if applicable."
+    "Specific drill to fix the first issue. Name it, explain how to run it.",
+    "Specific drill to fix the second issue — different from improvement 1.",
+    "Third fix only if there was a third issue."
   ]
-}
-  `.trim();
+}`.trim();
 }
 
 // ─── Analysis Output Sanitizer ────────────────────────────────────────────────
@@ -869,113 +622,42 @@ function sanitizeAnalysis(parsed) {
     timeLost: Array.isArray(parsed.timeLost) ? parsed.timeLost : [],
     improvements: Array.isArray(parsed.improvements) ? parsed.improvements : [],
     drills: Array.isArray(parsed.drills) ? parsed.drills : [],
-    // Legacy fields for backward compat with old saved analyses
     observations: Array.isArray(parsed.observations) ? parsed.observations : [],
     strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
     issues: Array.isArray(parsed.issues) ? parsed.issues : [],
   };
 }
 
-function sanitizePythonForClient(pythonResult) {
-  if (!pythonResult || typeof pythonResult !== "object") return null;
-  return {
-    ok: !!pythonResult.ok,
-    message: pythonResult.message || "",
-    frame_count: pythonResult.frame_count ?? 0,
-    fps: pythonResult.fps ?? 0,
-    width: pythonResult.width ?? 0,
-    height: pythonResult.height ?? 0,
-    duration_seconds: pythonResult.duration_seconds ?? 0,
-    horse_detected_frames: pythonResult.horse_detected_frames ?? 0,
-    raw_trajectory_point_count: pythonResult.raw_trajectory_point_count ?? 0,
-    accepted_trajectory_point_count: pythonResult.accepted_trajectory_point_count ?? 0,
-    smoothed_trajectory_point_count: pythonResult.smoothed_trajectory_point_count ?? 0,
-    tracking_quality: pythonResult.tracking_quality || null,
-    barrel_detection_summary: pythonResult.barrel_detection_summary || null,
-    identified_barrels: pythonResult.identified_barrels || { barrel1: null, barrel2: null, barrel3: null },
-    turns: pythonResult.turns || { barrel1: null, barrel2: null, barrel3: null },
-    splits: pythonResult.splits || {
-      start_to_barrel1_seconds: null,
-      barrel1_to_barrel2_seconds: null,
-      barrel2_to_barrel3_seconds: null,
-      barrel3_to_home_seconds: null,
-      splits_method: "no_data",
-    },
-    pattern_direction: pythonResult.pattern_direction || null,
-    insights: Array.isArray(pythonResult.insights) ? pythonResult.insights : [],
-    highlights: pythonResult.highlights || null,
-    speed_summary: pythonResult.speed_summary || null,
-    frame_metrics: Array.isArray(pythonResult.frame_metrics)
-      ? pythonResult.frame_metrics.map((m) => ({
-          frame_index: m?.frame_index ?? null,
-          timestamp_seconds: m?.timestamp_seconds ?? null,
-          horse_detected: !!m?.horse_detected,
-          horse_center: m?.horse_center || null,
-          nearest_barrel: m?.nearest_barrel || null,
-          nearest_barrel_distance_px: m?.nearest_barrel_distance_px ?? null,
-          dist_to_barrel1_px: m?.dist_to_barrel1_px ?? null,
-          dist_to_barrel2_px: m?.dist_to_barrel2_px ?? null,
-          dist_to_barrel3_px: m?.dist_to_barrel3_px ?? null,
-        }))
-      : [],
-  };
-}
-
 // ─── Job Processors ───────────────────────────────────────────────────────────
 
-async function processVideoJob(jobId) {
+async function processAnalysisJob(jobId) {
   const job = jobs.get(jobId);
   if (!job) {
-    console.warn("[VIDEO JOB] Job missing at start:", jobId);
+    console.warn("[ANALYSIS JOB] Job missing at start:", jobId);
     return;
   }
 
-  const videoPath = job.videoPath;
-
   try {
-    updateJob(jobId, { status: "running", progress: 5, stage: "Starting analysis", startedAt: new Date().toISOString() });
-
-    // ── Slow ticker while Python runs ─────────────────────────────────────
-    // Python takes 30-60s. Without this the bar sits frozen at 5%.
-    // Ticks from 5 → 48 over ~50 seconds so the user sees steady movement.
-    let currentProgress = 5;
-    const ticker = setInterval(() => {
-      const j = jobs.get(jobId);
-      if (!j || j.status !== "running") {
-        clearInterval(ticker);
-        return;
-      }
-      if (currentProgress < 48) {
-        currentProgress += 1;
-        updateJob(jobId, { progress: currentProgress, stage: "Running computer vision — tracking horse and barrels" });
-      } else {
-        clearInterval(ticker);
-      }
-    }, 1000); // ticks every 1 second
-
-    let pythonResult;
-    try {
-      pythonResult = await runPythonAnalysis(videoPath, job.run);
-    } finally {
-      clearInterval(ticker); // always stop ticker when Python finishes
-    }
-
-    updateJob(jobId, { progress: 55, stage: "Computer vision complete — building coaching report" });
+    updateJob(jobId, { status: "running", progress: 10, stage: "Building coaching report", startedAt: new Date().toISOString() });
 
     const latestJob = jobs.get(jobId);
     if (!latestJob) throw new Error("Job disappeared before AI analysis.");
 
-    updateJob(jobId, { progress: 70, stage: "AI coach analyzing your run data" });
+    updateJob(jobId, { progress: 30, stage: "Analyzing your splits and run data" });
 
-    const prompt = buildCoachingPrompt(latestJob.run, pythonResult);
+    const hasSplits = !!latestJob.run?.manualSplits;
+    const prompt = hasSplits ? buildCoachingPrompt(latestJob.run) : buildTextOnlyPrompt(latestJob.run);
+
+    updateJob(jobId, { progress: 50, stage: "Getting coaching feedback" });
 
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
-      max_tokens: 4000,
+      max_tokens: 2000,
+      temperature: 0.8,
       messages: [
         {
           role: "system",
-          content: "You are an elite barrel racing coach. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns or approaches. You NEVER use labels like PRIMARY, SECONDARY, timeLost[0], or timeLost[1] in your responses. You always return valid JSON only. No markdown, no preamble."
+          content: "You are a real barrel racing coach talking at the gate. You never use the words 'wide', 'wider', or 'narrow'. You never use invented fault labels. You speak plainly and specifically. You return valid JSON only — no markdown, no preamble, no extra text.",
         },
         {
           role: "user",
@@ -984,7 +666,7 @@ async function processVideoJob(jobId) {
       ],
     });
 
-    updateJob(jobId, { progress: 92, stage: "Finalizing coaching feedback" });
+    updateJob(jobId, { progress: 85, stage: "Finishing up" });
 
     const outputText = response.choices?.[0]?.message?.content || "";
     let parsedAnalysis;
@@ -994,9 +676,9 @@ async function processVideoJob(jobId) {
       const recovered = extractLastJsonObject(outputText);
       if (recovered && recovered.summary) {
         parsedAnalysis = recovered;
-        console.warn("[VIDEO JOB] Recovered partial JSON from AI response");
+        console.warn("[ANALYSIS JOB] Recovered partial JSON from AI response");
       } else {
-        console.error("[VIDEO JOB] Invalid AI JSON:", preview(outputText, 500));
+        console.error("[ANALYSIS JOB] Invalid AI JSON:", preview(outputText, 500));
         throw new Error("AI returned invalid JSON.");
       }
     }
@@ -1004,75 +686,7 @@ async function processVideoJob(jobId) {
     updateJob(jobId, {
       status: "completed",
       progress: 100,
-      stage: "Completed",
-      completedAt: new Date().toISOString(),
-      result: {
-        success: true,
-        analysis: sanitizeAnalysis(parsedAnalysis),
-        python: sanitizePythonForClient(pythonResult),
-        frameCount: 0,
-      },
-    });
-
-  } catch (err) {
-    console.error("[VIDEO JOB ERROR]", err.message);
-    updateJob(jobId, {
-      status: "failed", progress: 100, stage: "Failed",
-      completedAt: new Date().toISOString(),
-      error: err.message || "Video analysis failed.",
-    });
-  } finally {
-    safeCleanup([videoPath]);
-  }
-}
-
-async function processTextJob(jobId) {
-  const job = jobs.get(jobId);
-  if (!job) {
-    console.warn("[TEXT JOB] Job missing at start:", jobId);
-    return;
-  }
-
-  try {
-    updateJob(jobId, { status: "running", progress: 15, stage: "Preparing analysis", startedAt: new Date().toISOString() });
-    updateJob(jobId, { progress: 40, stage: "Requesting AI coaching analysis" });
-
-    const latestJob = jobs.get(jobId);
-    if (!latestJob) throw new Error("Job disappeared before AI analysis.");
-
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      max_tokens: 3000,
-      messages: [
-        {
-          role: "system",
-          content: "You are an elite barrel racing coach. You NEVER use the words 'wide', 'wider', or 'narrow' to describe turns or approaches. You NEVER use labels like PRIMARY, SECONDARY, timeLost[0], or timeLost[1] in your responses. You always return valid JSON only. No markdown, no preamble."
-        },
-        { role: "user", content: buildTextOnlyPrompt(latestJob.run) }
-      ],
-    });
-
-    updateJob(jobId, { progress: 90, stage: "Finalizing coaching feedback" });
-
-    const outputText = response.choices?.[0]?.message?.content || "";
-    let parsedAnalysis;
-    try {
-      parsedAnalysis = parseModelJson(outputText);
-    } catch {
-      const recovered = extractLastJsonObject(outputText);
-      if (recovered && recovered.summary) {
-        parsedAnalysis = recovered;
-        console.warn("[TEXT JOB] Recovered partial JSON from AI response");
-      } else {
-        console.error("[TEXT JOB] Invalid AI JSON:", preview(outputText, 500));
-        throw new Error("AI returned invalid JSON.");
-      }
-    }
-
-    updateJob(jobId, {
-      status: "completed",
-      progress: 100,
-      stage: "Completed",
+      stage: "Done",
       completedAt: new Date().toISOString(),
       result: {
         success: true,
@@ -1083,19 +697,20 @@ async function processTextJob(jobId) {
     });
 
   } catch (err) {
-    console.error("[TEXT JOB ERROR]", err.message);
+    console.error("[ANALYSIS JOB ERROR]", err.message);
     updateJob(jobId, {
       status: "failed", progress: 100, stage: "Failed",
       completedAt: new Date().toISOString(),
       error: err.message || "Analysis failed.",
     });
+  } finally {
+    if (job.videoPath) safeCleanup([job.videoPath]);
   }
 }
 
 function startJobProcessing(job) {
   console.log("[JOB START]", job.id, "kind:", job.kind);
-  if (job.kind === "video") void processVideoJob(job.id);
-  else if (job.kind === "text") void processTextJob(job.id);
+  void processAnalysisJob(job.id);
 }
 
 // ─── Expired Minor Account Cleanup (runs every 6 hours) ──────────────────────
@@ -1186,7 +801,7 @@ app.post("/compare-runs", async (req, res) => {
     const prompt = `You are analyzing two barrel racing runs. State only facts from the data provided. Do not guess at causes, do not give coaching advice, do not speculate. Only describe what the numbers show.\n\n${buildDesc(runA, splitsA, "Run A")}\n${buildDesc(runB, splitsB, "Run B")}\n\nWrite 3-5 short factual sentences comparing these two runs. Only state what the numbers directly show.`;
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       messages: [{ role: "user", content: prompt }],
       max_tokens: 300,
     });
@@ -1198,6 +813,7 @@ app.post("/compare-runs", async (req, res) => {
     res.status(500).json({ error: "Failed to generate comparison summary." });
   }
 });
+
 app.get("/debug/jobs", (_req, res) => {
   res.json({
     ok: true,
@@ -1210,36 +826,35 @@ app.get("/debug/jobs", (_req, res) => {
   });
 });
 
+// Both video and text analysis routes now use the same fast AI-only pipeline
 app.post("/analyze-run-video/start", upload.single("video"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "No video file uploaded." });
-
     const run = safeParseJson(req.body?.runData ?? req.body?.run ?? "{}");
     if (!run || typeof run !== "object") {
-      safeCleanup([req.file.path]);
+      if (req.file) safeCleanup([req.file.path]);
       return res.status(400).json({ error: "Run data was missing or invalid." });
     }
 
-    const job = createJob({ kind: "video", run, videoPath: req.file.path });
-    updateJob(job.id, { progress: 5, stage: "Upload received" });
+    const job = createJob({ kind: "analysis", run, videoPath: req.file?.path || null });
+    updateJob(job.id, { progress: 5, stage: "Starting analysis" });
     startJobProcessing(job);
 
-    console.log("[START VIDEO]", job.id);
+    console.log("[START VIDEO ANALYSIS]", job.id);
     return res.json({ ok: true, jobId: job.id });
   } catch (err) {
     console.error("[START VIDEO ERROR]", err.message);
-    return res.status(500).json({ error: "Could not start video analysis.", details: err.message });
+    return res.status(500).json({ error: "Could not start analysis.", details: err.message });
   }
 });
 
 app.post("/analyze-run/start", async (req, res) => {
   try {
     const run = req.body || {};
-    const job = createJob({ kind: "text", run });
-    updateJob(job.id, { progress: 5, stage: "Analysis request received" });
+    const job = createJob({ kind: "analysis", run });
+    updateJob(job.id, { progress: 5, stage: "Starting analysis" });
     startJobProcessing(job);
 
-    console.log("[START TEXT]", job.id);
+    console.log("[START TEXT ANALYSIS]", job.id);
     return res.json({ ok: true, jobId: job.id });
   } catch (err) {
     console.error("[START TEXT ERROR]", err.message);
@@ -1426,22 +1041,23 @@ app.post("/generate-insights", async (req, res) => {
       return `Insight: ${i.title}\nKey: ${i.key}\nStats: ${JSON.stringify(i.stats)}`;
     }).join("\n\n---\n\n");
 
-    const prompt = `You are a barrel racing data analyst. A rider has a horse named "${horseName}". Below are computed statistics from their run history. Write a short, conversational 2-3 sentence insight for EACH one. Be specific — use the actual numbers. Do not give coaching advice or guess at causes. Only state what the data shows.
+    const prompt = `You are a barrel racing performance analyst looking at a rider's run log data for a horse named "${horseName}". For each insight below, write 2-3 sentences that are specific to the actual numbers. Sound like a trainer who just pulled up the stats — plain language, no fluff, name actual times and gaps.
 
-Format your response as JSON: { "timeTrend": "summary...", "personalBest": "summary...", ... }
-Use the "key" field as the JSON key for each insight.
+Format your response as JSON only: { "timeTrend": "...", "personalBest": "...", ... }
+Use the exact "key" field from each insight as the JSON key.
 
 RULES:
-- Only reference numbers that are in the stats
-- No coaching advice, no "consider doing X"
-- Be conversational, like a smart friend reading your data
-- If a trend is clear, state it plainly
-- Keep each summary to 2-3 sentences max
+- Name specific numbers — never be vague
+- If one arena condition is faster, name both and the difference
+- Compare directly: "On firm ground the average is 15.2s — that's 0.4s faster than on deep ground at 15.6s"
+- No training advice — data only
+- No apologies for limited data — just state what's there
+- 2-3 sentences max, no padding
 
 ${insightDescriptions}`;
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.7,
       max_tokens: 1500,
@@ -1464,6 +1080,7 @@ ${insightDescriptions}`;
     res.status(500).json({ error: "Failed to generate insights." });
   }
 });
+
 // ─── Error Handler ────────────────────────────────────────────────────────────
 
 app.use((err, _req, res, _next) => {
