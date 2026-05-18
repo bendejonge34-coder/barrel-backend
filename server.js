@@ -617,14 +617,27 @@ Return ONLY this JSON:
 // ─── Analysis Output Sanitizer ────────────────────────────────────────────────
 
 function sanitizeAnalysis(parsed) {
+  const filterPlaceholders = (arr) => {
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(item => {
+      if (!item || typeof item !== "string") return false;
+      const lower = item.toLowerCase();
+      return !lower.includes("if no other") &&
+             !lower.includes("remains empty") &&
+             !lower.includes("omit this") &&
+             !lower.includes("leave it out") &&
+             !lower.includes("only if") &&
+             !lower.includes("does not apply");
+    });
+  };
   return {
     summary: parsed.summary || "",
-    timeLost: Array.isArray(parsed.timeLost) ? parsed.timeLost : [],
-    improvements: Array.isArray(parsed.improvements) ? parsed.improvements : [],
-    drills: Array.isArray(parsed.drills) ? parsed.drills : [],
-    observations: Array.isArray(parsed.observations) ? parsed.observations : [],
-    strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
-    issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+    timeLost: filterPlaceholders(parsed.timeLost),
+    improvements: filterPlaceholders(parsed.improvements),
+    drills: filterPlaceholders(parsed.drills),
+    observations: filterPlaceholders(parsed.observations),
+    strengths: filterPlaceholders(parsed.strengths),
+    issues: filterPlaceholders(parsed.issues),
   };
 }
 
