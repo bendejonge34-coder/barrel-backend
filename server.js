@@ -840,15 +840,17 @@ app.get("/debug/jobs", (_req, res) => {
 });
 
 // Both video and text analysis routes now use the same fast AI-only pipeline
-app.post("/analyze-run-video/start", upload.single("video"), async (req, res) => {
+app.post("/analyze-run-video/start", async (req, res) => {
   try {
-    const run = safeParseJson(req.body?.runData ?? req.body?.run ?? "{}");
-    if (!run || typeof run !== "object") {
-      if (req.file) safeCleanup([req.file.path]);
+    const runData = safeParseJson(req.body?.runData ?? req.body?.run ?? "{}");
+    if (!runData || typeof runData !== "object") {
       return res.status(400).json({ error: "Run data was missing or invalid." });
     }
 
-    const job = createJob({ kind: "analysis", run, videoPath: req.file?.path || null });
+    const videoUrl = req.body?.videoUrl || null;
+    const run = { ...runData, videoUrl };
+
+    const job = createJob({ kind: "analysis", run, videoPath: null });
     updateJob(job.id, { progress: 5, stage: "Starting analysis" });
     startJobProcessing(job);
 
