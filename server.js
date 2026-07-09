@@ -1,4 +1,5 @@
 import cors from "cors";
+import crypto from "crypto";
 import dotenv from "dotenv";
 import express from "express";
 import fs from "fs";
@@ -63,8 +64,30 @@ try {
 // ─── Express Setup ────────────────────────────────────────────────────────────
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
 app.use(express.json({ limit: "2mb" }));
+
+// ─── Auth Middleware ──────────────────────────────────────────────────────────
+
+async function requireAuth(req, res, next) {
+  if (!adminAuth) {
+    console.error("[AUTH] Rejected request — Firebase Admin not configured on server.");
+    return res.status(503).json({ error: "Server auth is not configured." });
+  }
+  const header = req.headers.authorization || "";
+  const match = header.match(/^Bearer (.+)$/);
+  if (!match) return res.status(401).json({ error: "Missing bearer token." });
+  try {
+    req.user = await adminAuth.verifyIdToken(match[1]);
+    next();
+  } catch (err) {
+    console.warn("[AUTH] Token verification failed:", err.message);
+    return res.status(401).json({ error: "Invalid or expired token." });
+  }
+}
 
 // ─── Uploads Directory ────────────────────────────────────────────────────────
 
@@ -135,6 +158,14 @@ function parseModelJson(outputText) {
 function preview(text, max = 200) {
   return String(text || "").slice(0, max);
 }
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // ─── File Cleanup ─────────────────────────────────────────────────────────────
 
@@ -258,10 +289,10 @@ function scheduleJobCleanup(jobId) {
   cleanupTimers.set(jobId, setTimeout(() => deleteJob(jobId), delay));
 }
 
-function createJob({ kind, run, videoPath = null }) {
+function createJob({ kind, run, videoPath = null, ownerUid = null }) {
   const jobId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const job = {
-    id: jobId, kind, run, videoPath,
+    id: jobId, kind, run, videoPath, ownerUid,
     status: "queued", progress: 0, stage: "Queued",
     createdAt: new Date().toISOString(),
     startedAt: null, completedAt: null,
@@ -797,7 +828,7 @@ restoreGuardianStore().catch((err) => console.error("[BOOT] Guardian restore fai
 app.get("/", (_req, res) => res.json({ ok: true, message: "Barrel Pro AI Server running", activeJobs: jobs.size }));
 app.get("/health", (_req, res) => res.json({ ok: true, message: "Barrel Pro AI Server running", activeJobs: jobs.size }));
 
-app.post("/compare-runs", async (req, res) => {
+app.post("/compare-runs", requireAuth, async (req, res) => {
   try {
     const { runA, runB, splitsA, splitsB } = req.body;
     if (!runA || !runB) return res.status(400).json({ error: "Two runs required." });
@@ -827,20 +858,8 @@ app.post("/compare-runs", async (req, res) => {
   }
 });
 
-app.get("/debug/jobs", (_req, res) => {
-  res.json({
-    ok: true,
-    count: jobs.size,
-    jobs: Array.from(jobs.values()).map((j) => ({
-      id: j.id, kind: j.kind, status: j.status, progress: j.progress,
-      stage: j.stage, createdAt: j.createdAt, startedAt: j.startedAt,
-      completedAt: j.completedAt, error: j.error, hasResult: !!j.result,
-    })),
-  });
-});
-
 // Both video and text analysis routes now use the same fast AI-only pipeline
-app.post("/analyze-run-video/start", async (req, res) => {
+app.post("/analyze-run-video/start", requireAuth, async (req, res) => {
   try {
     const runData = safeParseJson(req.body?.runData ?? req.body?.run ?? "{}");
     if (!runData || typeof runData !== "object") {
@@ -850,7 +869,7 @@ app.post("/analyze-run-video/start", async (req, res) => {
     const videoUrl = req.body?.videoUrl || null;
     const run = { ...runData, videoUrl };
 
-    const job = createJob({ kind: "analysis", run, videoPath: null });
+    const job = createJob({ kind: "analysis", run, videoPath: null, ownerUid: req.user.uid });
     updateJob(job.id, { progress: 5, stage: "Starting analysis" });
     startJobProcessing(job);
 
@@ -862,10 +881,10 @@ app.post("/analyze-run-video/start", async (req, res) => {
   }
 });
 
-app.post("/analyze-run/start", async (req, res) => {
+app.post("/analyze-run/start", requireAuth, async (req, res) => {
   try {
     const run = req.body || {};
-    const job = createJob({ kind: "analysis", run });
+    const job = createJob({ kind: "analysis", run, ownerUid: req.user.uid });
     updateJob(job.id, { progress: 5, stage: "Starting analysis" });
     startJobProcessing(job);
 
@@ -877,12 +896,12 @@ app.post("/analyze-run/start", async (req, res) => {
   }
 });
 
-app.get("/analysis-status/:jobId", (req, res) => {
+app.get("/analysis-status/:jobId", requireAuth, (req, res) => {
   const jobId = String(req.params.jobId || "").trim();
   console.log("[POLL]", jobId, "exists:", jobs.has(jobId), "total:", jobs.size);
 
   const job = jobs.get(jobId);
-  if (!job) {
+  if (!job || (job.ownerUid && job.ownerUid !== req.user.uid)) {
     return res.status(404).json({
       ok: false,
       error: "Job not found.",
@@ -907,15 +926,28 @@ app.get("/analysis-status/:jobId", (req, res) => {
 
 // ─── Guardian Routes ──────────────────────────────────────────────────────────
 
-app.post("/send-guardian-email", async (req, res) => {
+app.post("/send-guardian-email", requireAuth, async (req, res) => {
   try {
     const { guardianEmail, guardianName, minorEmail, minorAge, userId } = req.body;
 
     if (!guardianEmail || !guardianName || !minorEmail || !userId) {
       return res.status(400).json({ error: "Missing required fields." });
     }
+    if (userId !== req.user.uid) {
+      return res.status(403).json({ error: "Cannot request guardian approval for another account." });
+    }
+    if (!EMAIL_RE.test(guardianEmail) || !EMAIL_RE.test(minorEmail)) {
+      return res.status(400).json({ error: "Please provide valid email addresses." });
+    }
+    const ageNum = Number(minorAge);
+    if (!Number.isInteger(ageNum) || ageNum < 1 || ageNum > 17) {
+      return res.status(400).json({ error: "Invalid age." });
+    }
+    if (String(guardianName).length > 200) {
+      return res.status(400).json({ error: "Guardian name is too long." });
+    }
 
-    const token = `${userId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const token = crypto.randomBytes(32).toString("hex");
 
     pendingConfirmations.set(token, {
       userId, minorEmail, guardianEmail, guardianName, createdAt: Date.now(),
@@ -933,7 +965,7 @@ app.post("/send-guardian-email", async (req, res) => {
       html: `
         <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 24px;">
           <h2 style="color: #1ecad3;">Barrel Pro — Parental Approval Required</h2>
-          <p>Hello ${guardianName},</p>
+          <p>Hello ${escapeHtml(guardianName)},</p>
           <p>A Barrel Pro account was created for a user under 18 with you listed as parent or guardian.</p>
           <p><strong>Your child cannot access the app until you confirm below.</strong></p>
           <div style="text-align: center; margin: 32px 0; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap;">
@@ -941,9 +973,9 @@ app.post("/send-guardian-email", async (req, res) => {
             <a href="${rejectUrl}" style="background: #b91c1c; color: #fff; padding: 16px 32px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 16px; display: inline-block; margin: 8px;">❌ Reject & Delete Account</a>
           </div>
           <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
-            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Account Email</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${minorEmail}</td></tr>
-            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">User Age</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${minorAge} years old</td></tr>
-            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Guardian Name</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${guardianName}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Account Email</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${escapeHtml(minorEmail)}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">User Age</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${ageNum} years old</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Guardian Name</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${escapeHtml(guardianName)}</td></tr>
             <tr><td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: 600;">Date</td><td style="padding: 8px; border: 1px solid #e5e7eb;">${new Date().toLocaleDateString()}</td></tr>
           </table>
           <p style="color: #6b7280; font-size: 13px;">If you click <strong>Reject</strong>, the account and all associated data will be permanently deleted.</p>
@@ -973,6 +1005,13 @@ app.get("/confirm-guardian", async (req, res) => {
       return res.status(400).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#1ecad3;">✅ Already Approved</h2><p>This account has already been approved. Your child can now open the app and sign in.</p><p style="color:#9ca3af;font-size:13px;margin-top:32px;">Barrel Pro — Built for barrel racers</p></div>`);
     }
 
+    const sevenDays = 1000 * 60 * 60 * 24 * 7;
+    if (Date.now() - record.createdAt >= sevenDays) {
+      pendingConfirmations.delete(token);
+      persistGuardianStore();
+      return res.status(400).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Link Expired</h2><p>This confirmation link has expired. Please ask your child to sign up again.</p></div>`);
+    }
+
     confirmedUsers.set(record.userId, { confirmedAt: new Date().toISOString(), minorEmail: record.minorEmail });
     pendingConfirmations.delete(token);
     persistGuardianStore();
@@ -995,6 +1034,13 @@ app.get("/reject-guardian", async (req, res) => {
     const record = pendingConfirmations.get(token);
     if (!record) {
       return res.status(400).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Link Expired or Already Used</h2><p>Contact us at <a href="mailto:ben.dejonge34@gmail.com">ben.dejonge34@gmail.com</a></p></div>`);
+    }
+
+    const sevenDays = 1000 * 60 * 60 * 24 * 7;
+    if (Date.now() - record.createdAt >= sevenDays) {
+      pendingConfirmations.delete(token);
+      persistGuardianStore();
+      return res.status(400).send(`<div style="font-family:sans-serif;max-width:500px;margin:60px auto;text-align:center;padding:24px;"><h2 style="color:#b91c1c;">Link Expired</h2><p>This rejection link has expired.</p></div>`);
     }
 
     const { userId, minorEmail } = record;
@@ -1031,9 +1077,10 @@ app.get("/reject-guardian", async (req, res) => {
   }
 });
 
-app.get("/guardian-status/:userId", (req, res) => {
+app.get("/guardian-status/:userId", requireAuth, (req, res) => {
   const userId = String(req.params.userId || "").trim();
   if (!userId) return res.status(400).json({ ok: false, error: "Missing userId." });
+  if (userId !== req.user.uid) return res.status(403).json({ ok: false, error: "Forbidden." });
 
   const confirmed = confirmedUsers.has(userId);
   const rejected = rejectedUsers.has(userId);
@@ -1045,7 +1092,7 @@ app.get("/guardian-status/:userId", (req, res) => {
 
 // ─── Generate Insights ────────────────────────────────────────────────────────
 
-app.post("/generate-insights", async (req, res) => {
+app.post("/generate-insights", requireAuth, async (req, res) => {
   try {
     const { horseName, insights } = req.body;
     if (!insights || !Array.isArray(insights) || insights.length === 0) {
