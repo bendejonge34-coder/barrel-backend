@@ -167,6 +167,14 @@ async function checkActive(appUserId) {
     apiVersionUsedCounts.v2++;
     return v2.active;
   }
+  // V2 answered successfully and this customer simply has no subscriptions.
+  // That is a definitive "not a subscriber" — do NOT fall through to V1.
+  // V2-format secret keys are rejected outright by V1 (code 7723), which would
+  // turn every no-record user into a thrown lookup failure.
+  if (v2.ok) {
+    apiVersionUsedCounts.v2++;
+    return false;
+  }
 
   const v1 = await checkActiveV1(appUserId);
   if (!v1.ok) {
