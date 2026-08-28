@@ -29,6 +29,9 @@ console.log("========================");
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// Model used for the run-analysis coaching path (processAnalysisJob).
+const ANALYSIS_MODEL = "gpt-5";
+
 // ─── Resend ───────────────────────────────────────────────────────────────────
 
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -695,9 +698,9 @@ async function processAnalysisJob(jobId) {
     updateJob(jobId, { progress: 50, stage: "Getting coaching feedback" });
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      max_tokens: 2000,
-      temperature: 0.8,
+      model: ANALYSIS_MODEL,
+      max_completion_tokens: 4000,
+      reasoning_effort: "low",
       messages: [
         {
           role: "system",
