@@ -409,6 +409,39 @@ function buildHistoricalContext(run) {
     })
     .join(" | ");
 
+  // Same-location split averages. Only exact location matches count, and a
+  // knocked-barrel N-T is thrown out entirely — there is no usable run behind
+  // it. A +5 still ran the pattern, so its splits stay in.
+  const SPLIT_LABELS = [
+    ["start_to_barrel1_seconds", "1st barrel"],
+    ["barrel1_to_barrel2_seconds", "2nd barrel"],
+    ["barrel2_to_barrel3_seconds", "3rd barrel"],
+    ["barrel3_to_home_seconds", "home"],
+  ];
+
+  let locationSplitsText = "";
+  const currentLocation = run?.location;
+  if (currentLocation) {
+    const sameLocationRuns = history.filter(r =>
+      r.horse === horseName &&
+      r.location === currentLocation &&
+      r.knockedPenalty !== "nt" &&
+      r.manualSplits && typeof r.manualSplits === "object"
+    );
+
+    if (sameLocationRuns.length >= 2) {
+      const parts = SPLIT_LABELS.map(([key, label]) => {
+        const values = sameLocationRuns
+          .map(r => Number(r.manualSplits[key]))
+          .filter(v => Number.isFinite(v));
+        if (values.length === 0) return `${label} n/a`;
+        const mean = values.reduce((a, b) => a + b, 0) / values.length;
+        return `${label} ${mean.toFixed(3)}s`;
+      });
+      locationSplitsText = `At ${currentLocation}, this horse's average splits across ${sameLocationRuns.length} prior runs: ${parts.join(", ")}.`;
+    }
+  }
+
   const currentRunNotes = [];
   if (run.riderFeedback) currentRunNotes.push(`Rider felt: "${run.riderFeedback}"`);
   if (run.notes) currentRunNotes.push(`Notes: "${run.notes}"`);
@@ -422,7 +455,7 @@ HISTORY FOR ${horseName.toUpperCase()} (${horseRuns.length} logged runs):
 - ${vsPersonalBest}
 - Arena conditions: ${arenaHistory || "none logged"}
 - Recent shows: ${recentShows || "none logged"}
-- This run notes: ${currentRunNotesText || "none"}
+- This run notes: ${currentRunNotesText || "none"}${locationSplitsText ? "\n- " + locationSplitsText : ""}
 `.trim();
 }
 
