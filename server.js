@@ -699,7 +699,7 @@ async function processAnalysisJob(jobId) {
 
     const response = await openai.chat.completions.create({
       model: ANALYSIS_MODEL,
-      max_completion_tokens: 4000,
+      max_completion_tokens: 6000,
       reasoning_effort: "low",
       messages: [
         {
