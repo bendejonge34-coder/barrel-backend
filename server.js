@@ -903,7 +903,8 @@ app.post("/analyze-run-video/start", requireAuth, async (req, res) => {
     }
 
     const videoUrl = req.body?.videoUrl || null;
-    const run = { ...runData, videoUrl };
+    const runHistory = req.body?.runHistory ?? runData?.runHistory ?? [];
+    const run = { ...runData, videoUrl, runHistory };
 
     const job = createJob({ kind: "analysis", run, videoPath: null, ownerUid: req.user.uid });
     updateJob(job.id, { progress: 5, stage: "Starting analysis" });
